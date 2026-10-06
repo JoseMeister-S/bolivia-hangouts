@@ -20,8 +20,18 @@ are used only for display and for the `.ics` export.
 
 | Page | Who | What |
 |---|---|---|
-| `index.html?c=CODE` | Friends | A trip overview (one cell per day, one bar per slot), day cards with filters, a countdown, and counts of confirmed plans and free slots. Propose a plan on a free slot, join a confirmed one, share the link on WhatsApp. |
-| `admin.html` | The host | Google sign-in. The same overview with pending and conflict marks; tap a day to see it and act on it. Approve, reject or edit proposals, manage confirmed hangouts and participants, see who you spend the most time with, reserve time for yourself (for example the gym on weekday mornings) or block slots, rotate the invite code, export `.ics`. |
+| `index.html?c=CODE` | Friends | The whole trip as one timetable: a row per day, a column per slot, every cell filled with what is in it. Tap a free slot to propose a plan, tap a confirmed plan to join it. The name is asked for once, in the first form that needs it. |
+| `admin.html` | The host | Google sign-in. The same timetable with pending proposals and clashes marked. Tap a slot to approve, reject or edit what is in it, manage who is coming, or reserve it for yourself (for example the gym on weekday mornings, in one step). Below it: the queue to confirm, who you spend the most time with, your reservations, the invite link and code rotation, and the `.ics` export. |
+
+## Design
+
+Six colors, each with one job: alabaster is the page, obsidian the ink, mahogany
+a confirmed plan, slate the host's own time, pewter time that is not available,
+bronze a proposal that waits for confirmation. One typeface, [Bricolage
+Grotesque](https://github.com/ateliertriay/bricolage) (SIL Open Font License,
+self-hosted in `fonts/`, no request to a font service): condensed in the
+timetable cells and the title, regular width for reading. Light and dark follow
+the system setting.
 
 ## Security model
 
@@ -114,4 +124,5 @@ local work, `http://localhost:5500/?emulator` points the pages at the emulators.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The font in `fonts/` has its own license,
+[`fonts/OFL.txt`](fonts/OFL.txt).

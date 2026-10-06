@@ -122,11 +122,12 @@ export const daysBetween = (from, to) =>
   Math.round((new Date(to + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / DAY_MS);
 
 const partsFormat = new Intl.DateTimeFormat('es-BO', { weekday: 'short', month: 'short', timeZone: 'UTC' });
-// { weekday: 'lun', day: 14, month: 'dic' }
+const monthFormat = new Intl.DateTimeFormat('es-BO', { month: 'long', timeZone: 'UTC' });
+// { weekday: 'lun', day: 14, month: 'dic', monthLong: 'diciembre' }
 export function dayParts(iso) {
   const date = new Date(iso + 'T00:00:00Z');
   const parts = Object.fromEntries(partsFormat.formatToParts(date).map((p) => [p.type, p.value.replace('.', '')]));
-  return { weekday: parts.weekday, day: date.getUTCDate(), month: parts.month };
+  return { weekday: parts.weekday, day: date.getUTCDate(), month: parts.month, monthLong: monthFormat.format(date) };
 }
 
 export function countdownText(start, end, today) {
@@ -138,38 +139,59 @@ export function countdownText(start, end, today) {
   return `Día ${daysBetween(start, today) + 1} de ${daysBetween(start, end) + 1}`;
 }
 
-// Month-style overview: one cell per day (weeks start on Monday), each with
-// four small bars, one per slot. stateOf(date, slotId) returns the CSS state
-// of a bar; badgeOf(date) may return a number to show in the corner.
-export function renderCalendar({ days, today, stateOf, describe, onPick, badgeOf }) {
-  const lead = (new Date(days[0] + 'T00:00:00Z').getUTCDay() + 6) % 7;
-  const cells = [...Array(lead).fill(null), ...days];
-  while (cells.length % 7) cells.push(null);
-  return el('div', { class: 'cal' },
-    ['L', 'M', 'X', 'J', 'V', 'S', 'D'].map((d) => el('span', { class: 'cal-dow', 'aria-hidden': 'true' }, d)),
-    cells.map((date, index) => {
-      if (!date) return el('span', { class: 'cal-empty' });
-      const { day, month } = dayParts(date);
-      const badge = badgeOf ? badgeOf(date) : 0;
-      return el('button', {
+// The trip as one timetable: a row per day, a column per slot, every cell
+// filled with what is in it. Both pages use it.
+//
+// cellFor(date, slotId) returns { status, title, sub, more, alert, merge }:
+//   status  'free' | 'gone' | 'plan' | 'wait' | 'own' | 'off'
+//   merge   neighbouring cells with the same merge key are drawn as one
+//           (an all-day "Navidad en familia" reads once, not four times)
+export function renderTimetable({ days, today, cellFor, onPick }) {
+  const rows = [el('div', { class: 'tt-row tt-head', 'aria-hidden': 'true' },
+    el('span'),
+    SLOTS.map((slot) => el('span', { class: 'tt-col' }, slot.label, el('small', {}, slot.start))),
+  )];
+  let month = null;
+  for (const date of days) {
+    const parts = dayParts(date);
+    if (parts.monthLong !== month) {
+      month = parts.monthLong;
+      rows.push(el('p', { class: 'tt-month' }, month));
+    }
+    const cells = [];
+    for (const slot of SLOTS) {
+      const cell = { slot, span: 1, ...cellFor(date, slot.id) };
+      const last = cells.at(-1);
+      if (last && cell.merge && last.merge === cell.merge) last.span += 1;
+      else cells.push(cell);
+    }
+    const monday = new Date(date + 'T00:00:00Z').getUTCDay() === 1;
+    rows.push(el('div', {
+      class: 'tt-row' + (date === today ? ' is-today' : '') + (date < today ? ' is-past' : '') + (monday ? ' week-start' : ''),
+      id: 'd-' + date,
+    },
+      el('span', { class: 'tt-day' }, el('small', {}, parts.weekday), parts.day),
+      cells.map((cell) => el('button', {
         type: 'button',
-        class: 'cal-day' + (date === today ? ' today' : '') + (date < today ? ' past' : ''),
-        'aria-label': formatDay(date) + (describe ? ': ' + describe(date) : ''),
-        onclick: () => onPick(date),
+        class: `tt-cell is-${cell.status}` + (cell.alert ? ' is-alert' : ''),
+        style: cell.span > 1 ? `grid-column: span ${cell.span}` : null,
+        disabled: cell.status === 'gone',
+        'aria-label': `${formatDay(date)}, ${cell.span === SLOTS.length ? 'todo el día' : cell.slot.label}: ${cell.title || 'libre'}`,
+        onclick: () => onPick(date, cell.slot.id),
       },
-        el('span', { class: 'cal-num' }, day, (day === 1 || index === lead) ? el('small', {}, month) : null),
-        el('span', { class: 'cal-bars' }, SLOTS.map((slot) => el('i', { class: 'bar ' + stateOf(date, slot.id) }))),
-        badge ? el('span', { class: 'cal-badge' }, badge) : null,
-      );
-    }),
-  );
+        cell.status === 'free' ? el('span', { class: 'tt-plus', 'aria-hidden': 'true' }, '+') : null,
+        cell.title ? el('span', { class: 'tt-t' }, cell.title) : null,
+        cell.sub ? el('span', { class: 'tt-s' }, cell.sub) : null,
+        cell.more ? el('span', { class: 'tt-more' }, `+${cell.more}`) : null,
+      )),
+    ));
+  }
+  return el('div', { class: 'tt' }, rows);
 }
 
 export function legend(items) {
-  return el('ul', { class: 'legend' }, items.map(([state, label]) =>
-    el('li', {}, el('i', { class: 'bar ' + state }), label)));
+  return el('ul', { class: 'legend' }, items.map(([status, label]) =>
+    el('li', {}, el('i', { class: 'swatch is-' + status }), label)));
 }
 
-export function statTile(value, label, tone = '') {
-  return el('div', { class: 'stat ' + tone }, el('strong', {}, value), el('span', {}, label));
-}
+export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;

@@ -5,95 +5,50 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#1b2824">
   <title>Jose en Cochabamba</title>
+  <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <header class="hero">
-    <div class="hero-inner">
-      <p class="eyebrow" id="trip-range">14 dic 2026 — 2 ene 2027</p>
-      <h1>Jose en <span>Cochabamba</span></h1>
-      <p class="countdown" id="countdown" hidden></p>
-    </div>
-    <div class="stripe" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <header class="top">
+    <h1>Jose en Cochabamba</h1>
+    <p class="lede" id="lede">Del 14 de diciembre al 2 de enero.</p>
   </header>
 
-  <main id="main">
+  <main>
     <p class="status" id="status">Cargando…</p>
 
-    <section id="gate" class="card center" hidden>
+    <section id="gate" hidden>
       <h2>Pídele el enlace a Jose</h2>
       <p>Esta página solo se abre con el enlace que Jose manda por WhatsApp.</p>
     </section>
 
     <section id="calendar" hidden>
-      <div class="toolbar">
-        <p id="hello"></p>
-        <button type="button" class="btn whatsapp" id="share">Compartir por WhatsApp</button>
-      </div>
-
-      <div class="stats" id="stats"></div>
-
-      <section class="card" aria-label="Vista del viaje">
-        <div class="card-head">
-          <h2>El viaje de un vistazo</h2>
-          <p class="hint">Toca un día para ir a él.</p>
-        </div>
-        <div id="cal"></div>
-        <div id="legend"></div>
-      </section>
-
-      <p class="notice">
-        Elige un espacio libre y propón un plan, o apúntate a uno ya confirmado.
+      <p class="intro">
+        Toca un espacio libre para proponer un plan, o toca un plan para apuntarte.
         Jose confirma cada propuesta antes de que aparezca aquí.
-        <strong>No pongas direcciones exactas.</strong>
       </p>
-
-      <div class="filters" id="filters" role="group" aria-label="Filtrar días"></div>
-      <div id="days"></div>
-      <p class="empty" id="no-days" hidden>Ningún día coincide con este filtro.</p>
+      <p class="summary" id="summary"></p>
+      <div id="tt"></div>
+      <div id="legend"></div>
+      <div class="tools">
+        <button type="button" class="btn" id="share">Compartir por WhatsApp</button>
+        <p id="hello"></p>
+      </div>
     </section>
   </main>
 
-  <footer class="foot">Horarios en hora de Bolivia.</footer>
+  <footer class="foot">Los horarios están en hora de Bolivia.</footer>
 
-  <dialog id="name-dialog">
-    <form method="dialog" id="name-form">
-      <h2>¿Cómo te llamas?</h2>
-      <p>Así Jose y los demás saben quién eres.</p>
-      <label>Tu nombre
-        <input name="name" maxlength="40" required autocomplete="given-name" placeholder="Ej. Caro">
-      </label>
-      <div class="actions">
-        <button type="submit" class="btn primary">Listo</button>
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title">
+    <header class="sheet-head">
+      <div>
+        <h2 id="sheet-title"></h2>
+        <p id="sheet-when"></p>
       </div>
-    </form>
-  </dialog>
-
-  <dialog id="propose-dialog">
-    <form method="dialog" id="propose-form">
-      <h2>Proponer plan</h2>
-      <p class="when" id="propose-when"></p>
-      <label>¿Qué hacemos?
-        <input name="title" maxlength="80" required placeholder="Ej. Café y ponernos al día">
-      </label>
-      <label>¿Dónde? <span class="hint">(un café o una zona, no una dirección)</span>
-        <input name="place" maxlength="80" placeholder="Ej. Zona de la Recoleta">
-      </label>
-      <label>Nota para Jose <span class="hint">(opcional)</span>
-        <textarea name="note" maxlength="280" rows="3"></textarea>
-      </label>
-      <!-- Honeypot: people never see or fill this field; bots often do. -->
-      <div class="hp" aria-hidden="true">
-        <label>Sitio web <input name="website" tabindex="-1" autocomplete="off"></label>
-      </div>
-      <p class="error" id="propose-error" hidden></p>
-      <div class="actions">
-        <button type="button" class="btn" id="propose-cancel">Cancelar</button>
-        <button type="submit" class="btn primary" id="propose-send">Enviar</button>
-      </div>
-    </form>
+      <button type="button" class="btn text" id="sheet-close">Cerrar</button>
+    </header>
+    <div id="sheet-body"></div>
   </dialog>
 
   <script type="module" src="index.js"></script>

@@ -1,11 +1,11 @@
-// Browser smoke test of the friends' page (headless Edge/Chrome through
+// Browser smoke test of a deployed site (headless Edge/Chrome through
 // playwright-core, which is not a dependency: `npm i --no-save playwright-core`).
 //
-//   node tests/smoke.mjs http://localhost:5500            -> gate + login screens
-//   INVITE_CODE=xxx node tests/smoke.mjs <base-url>       -> also the friend flow
-//   READ_ONLY=1 with a code                               -> look, but send nothing
+//   node tests/smoke.mjs https://your.site                -> gate + login screens
+//   INVITE_CODE=xxx READ_ONLY=1 node tests/smoke.mjs <url> -> also load the timetable
+//   INVITE_CODE=xxx node tests/smoke.mjs <url>             -> also send one proposal
 //
-// With a code it sends one proposal titled "[TEST] smoke". Delete it in admin.html.
+// Without READ_ONLY it sends one proposal titled "[TEST] smoke". Reject it in admin.html.
 import { chromium } from 'playwright-core';
 
 const base = (process.argv[2] || 'http://localhost:5500').replace(/\/$/, '');
@@ -22,7 +22,7 @@ async function open(path, options = {}) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(base + path);
-  return { page, errors, context };
+  return { page, errors };
 }
 
 {
@@ -42,34 +42,27 @@ async function open(path, options = {}) {
   await page.waitForSelector('#login:not([hidden])', { timeout: 20000 });
   check(await page.isHidden('#panel'), 'admin: login screen, no panel');
   check(errors.length === 0, 'admin: no script errors ' + errors.join(' | '));
-  if (shots) await page.screenshot({ path: `${shots}/admin-login.png` });
 }
 
 if (code) {
   for (const colorScheme of ['light', 'dark']) {
     const { page, errors } = await open('/?c=' + encodeURIComponent(code), { colorScheme });
-    await page.waitForSelector('#name-dialog[open]', { timeout: 20000 });
-    await page.fill('#name-form input[name=name]', 'Prueba');
-    await page.click('#name-form button[type=submit]');
-    check(await page.locator('.day').count() === 20, `${colorScheme}: 20 day cards`);
-    check(await page.locator('.cal-day').count() === 20, `${colorScheme}: calendar overview has 20 days`);
-    check(await page.locator('p.blocked').first().innerText() === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
-    check(await page.locator('.day').first().locator('button').count() === 0, `${colorScheme}: blocked day has no "Proponer" button`);
-    if (shots) await page.screenshot({ path: `${shots}/friends-${colorScheme}.png`, fullPage: false });
+    await page.waitForSelector('.tt-row[id^="d-"]', { timeout: 20000 });
+    check(await page.locator('.tt-row[id^="d-"]').count() === 20, `${colorScheme}: timetable has 20 days`);
+    check((await page.locator('#d-2026-12-14 .tt-cell').first().innerText()) === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
+    check(await page.evaluate(() => document.fonts.check('16px "Bricolage Grotesque"')), `${colorScheme}: the typeface loaded`);
+    if (shots) await page.screenshot({ path: `${shots}/live-${colorScheme}.png` });
 
     if (colorScheme === 'light' && !process.env.READ_ONLY) {
-      await page.locator('.day').nth(4).getByRole('button', { name: 'Proponer plan' }).first().click();
-      await page.fill('#propose-form input[name=title]', '[TEST] smoke');
-      await page.fill('#propose-form input[name=place]', 'Café de prueba');
-      if (shots) await page.screenshot({ path: `${shots}/propose.png` });
-      await page.click('#propose-send');
-      await page.waitForSelector('p.pending', { timeout: 20000 });
+      await page.locator('#d-2026-12-18 .tt-cell.is-free').first().click();
+      await page.fill('.propose input[name=name]', 'Prueba');
+      await page.fill('.propose input[name=title]', '[TEST] smoke');
+      await page.click('.propose button[type=submit]');
+      await page.waitForSelector('.tt-cell.is-wait', { timeout: 20000 });
       check((await page.locator('#toast').innerText()).startsWith('¡Enviado!'), 'proposal sent, confirmation shown');
-      check(await page.locator('div.hangout', { hasText: '[TEST] smoke' }).count() === 0, 'pending proposal is not shown as a hangout');
       await page.reload();
-      await page.waitForSelector('.day');
-      check(await page.locator('div.hangout', { hasText: '[TEST] smoke' }).count() === 0, 'still not visible after reload');
-      check(await page.locator('#name-dialog[open]').count() === 0, 'name is remembered');
+      await page.waitForSelector('.tt-row[id^="d-"]');
+      check(await page.locator('.tt-cell.is-plan', { hasText: '[TEST] smoke' }).count() === 0, 'pending proposal is not shown as a plan');
     }
     check(errors.length === 0, `${colorScheme}: no script errors ` + errors.join(' | '));
   }

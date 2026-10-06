@@ -5,164 +5,111 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#1b2824">
-  <title>Admin · Jose en Cochabamba</title>
+  <title>Panel de Jose</title>
+  <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="app.css">
 </head>
 <body class="admin">
-  <header class="hero">
-    <div class="hero-inner">
-      <p class="eyebrow" id="who">Panel privado</p>
-      <h1>Panel de <span>Jose</span></h1>
-      <p class="countdown" id="countdown" hidden></p>
-    </div>
-    <div class="stripe" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <header class="top">
+    <h1>Panel de Jose</h1>
+    <p class="lede" id="who"></p>
   </header>
 
-  <main id="main">
+  <main>
     <p class="status" id="status">Cargando…</p>
 
-    <section id="login" class="card center" hidden>
-      <h2>Solo para Jose</h2>
+    <section id="login" hidden>
+      <p>Esta página es solo para Jose.</p>
       <button type="button" class="btn primary" id="login-btn">Entrar con Google</button>
       <p class="error" id="login-error" hidden></p>
     </section>
 
-    <section id="not-admin" class="card" hidden>
-      <h2>Esta cuenta no es admin</h2>
-      <p>Para activarla, crea este documento en la consola de Firebase (Firestore):</p>
-      <p>Colección <code>admins</code> · ID del documento:</p>
+    <section id="not-admin" hidden>
+      <h2>Esta cuenta todavía no es admin</h2>
+      <p>En la consola de Firebase, abre Firestore y crea la colección <code>admins</code> con un documento vacío. Usa este ID para el documento:</p>
       <p><code id="uid" class="block"></code></p>
-      <p>El documento puede quedar vacío. Luego recarga esta página.</p>
+      <p>Después recarga esta página.</p>
       <div class="actions">
         <button type="button" class="btn" id="copy-uid">Copiar ID</button>
-        <button type="button" class="btn" id="logout-2">Salir</button>
+        <button type="button" class="btn text" id="logout-2">Salir</button>
       </div>
     </section>
 
-    <section id="setup" class="card" hidden>
-      <h2>Primera vez</h2>
-      <p>La base de datos está vacía. Esto crea el código de invitación, las fechas del viaje y los bloqueos iniciales.</p>
-      <button type="button" class="btn primary" id="setup-btn">Inicializar</button>
+    <section id="setup" hidden>
+      <h2>La base de datos está vacía</h2>
+      <p>Crea el código de invitación, las fechas del viaje y los bloqueos iniciales.</p>
+      <button type="button" class="btn primary" id="setup-btn">Crear calendario</button>
     </section>
 
     <div id="panel" hidden>
-      <div class="stats four" id="stats"></div>
-
-      <section class="card" aria-label="Vista del viaje">
-        <div class="card-head">
-          <h2>El viaje de un vistazo</h2>
-          <p class="hint">Toca un día para verlo y reservar tiempo.</p>
-        </div>
-        <div id="cal"></div>
-        <div id="legend"></div>
-      </section>
+      <p class="summary" id="summary"></p>
+      <div id="tt"></div>
+      <div id="legend"></div>
 
       <section>
-        <h2 class="section-title">Pendientes <span class="count" id="pending-count"></span></h2>
+        <h2>Por confirmar</h2>
         <div id="pending"></div>
       </section>
 
       <section>
-        <div class="section-head">
-          <h2 class="section-title">Confirmados <span class="count" id="approved-count"></span></h2>
-          <button type="button" class="btn small" id="export">Exportar .ics</button>
-        </div>
-        <div id="approved"></div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <h2>Con quién paso el tiempo</h2>
-          <p class="hint">Según quién está apuntado en los planes confirmados.</p>
-        </div>
+        <h2>Con quién paso el tiempo</h2>
+        <p class="hint">Un cuadro por cada plan confirmado con esa persona.</p>
         <div id="people"></div>
       </section>
 
-      <section class="card">
-        <div class="card-head row">
-          <div>
-            <h2>Mi tiempo y bloqueos</h2>
-            <p class="hint">Gimnasio, trabajo, familia. Nadie puede proponer en esos espacios.</p>
-          </div>
-          <button type="button" class="btn primary small" id="reserve-open">Reservar tiempo</button>
-        </div>
+      <section>
+        <h2>Mi tiempo y bloqueos</h2>
+        <p class="hint">Para reservar, toca un espacio del calendario.</p>
         <div id="blocked"></div>
       </section>
 
-      <section class="card">
+      <section>
         <h2>Enlace para amigos</h2>
         <p><code id="link" class="block"></code></p>
         <div class="actions">
-          <button type="button" class="btn" id="copy-link">Copiar</button>
-          <button type="button" class="btn whatsapp" id="share-link">WhatsApp</button>
-          <button type="button" class="btn danger" id="rotate">Cambiar código</button>
+          <button type="button" class="btn" id="copy-link">Copiar enlace</button>
+          <button type="button" class="btn" id="share-link">Mandar por WhatsApp</button>
+          <button type="button" class="btn text" id="rotate">Cambiar código</button>
         </div>
       </section>
 
       <section>
         <details>
-          <summary class="section-title">Rechazados <span class="count" id="rejected-count"></span></summary>
+          <summary>Propuestas rechazadas (<span id="rejected-count">0</span>)</summary>
           <div id="rejected"></div>
         </details>
       </section>
 
-      <p class="center"><button type="button" class="btn" id="logout">Salir</button></p>
+      <div class="tools">
+        <button type="button" class="btn" id="export">Descargar calendario (.ics)</button>
+        <button type="button" class="btn text" id="logout">Salir</button>
+      </div>
     </div>
   </main>
 
-  <dialog id="edit-dialog">
+  <dialog id="sheet" class="sheet" aria-labelledby="sheet-title">
+    <header class="sheet-head">
+      <div>
+        <h2 id="sheet-title"></h2>
+        <p id="sheet-when"></p>
+      </div>
+      <button type="button" class="btn text" id="sheet-close">Cerrar</button>
+    </header>
+    <div id="sheet-body"></div>
+  </dialog>
+
+  <dialog id="edit-dialog" class="sheet">
     <form method="dialog" id="edit-form">
       <h2>Editar</h2>
       <label>Día <select name="date" required></select></label>
       <label>Momento <select name="slot" required></select></label>
       <label>Plan <input name="title" maxlength="80" required></label>
       <label>Lugar <input name="place" maxlength="80"></label>
-      <label>Propuesto por <input name="proposer_name" maxlength="40" required></label>
-      <label>Nota <textarea name="note" maxlength="280" rows="3"></textarea></label>
+      <label>Lo propuso <input name="proposer_name" maxlength="40" required></label>
+      <label>Nota <textarea name="note" maxlength="280" rows="2"></textarea></label>
       <div class="actions">
-        <button type="button" class="btn" id="edit-cancel">Cancelar</button>
-        <button type="submit" class="btn primary">Guardar</button>
-      </div>
-    </form>
-  </dialog>
-
-  <dialog id="day-dialog">
-    <h2 class="when" id="day-title"></h2>
-    <div id="day-body"></div>
-    <div class="actions">
-      <button type="button" class="btn" id="day-close">Cerrar</button>
-    </div>
-  </dialog>
-
-  <dialog id="reserve-dialog">
-    <form method="dialog" id="reserve-form">
-      <h2>Reservar tiempo</h2>
-      <label>¿Para qué?
-        <input name="label" maxlength="80" required placeholder="Ej. Gimnasio">
-      </label>
-      <div class="presets" id="reserve-presets"></div>
-      <fieldset class="radios">
-        <legend>Cómo lo ven tus amigos</legend>
-        <label><input type="radio" name="kind" value="personal" checked> Tiempo mío <span class="hint">(«Jose · Gimnasio»)</span></label>
-        <label><input type="radio" name="kind" value="block"> No disponible <span class="hint">(solo el texto)</span></label>
-      </fieldset>
-      <label>Momento
-        <select name="slot" required></select>
-      </label>
-      <fieldset>
-        <legend>Días</legend>
-        <div class="presets">
-          <button type="button" class="chip-filter" data-pick="all">Todos</button>
-          <button type="button" class="chip-filter" data-pick="weekdays">Lun–Vie</button>
-          <button type="button" class="chip-filter" data-pick="none">Ninguno</button>
-        </div>
-        <div class="day-picks" id="reserve-days"></div>
-      </fieldset>
-      <p class="error" id="reserve-error" hidden></p>
-      <div class="actions">
-        <button type="button" class="btn" id="reserve-cancel">Cancelar</button>
-        <button type="submit" class="btn primary">Reservar</button>
+        <button type="submit" class="btn primary">Guardar cambios</button>
+        <button type="button" class="btn text" id="edit-cancel">Cancelar</button>
       </div>
     </form>
   </dialog>
