@@ -30,7 +30,9 @@ const SEED_BLOCKS = [
   ['2027-01-02', ['tarde', 'noche'], 'Vuelo de vuelta'],
 ];
 
-const state = { settings: null, proposals: [], hangouts: [], participants: new Map(), blocked: [] };
+// reservations: my own time and blocks, with their real labels (admin-only).
+// blocked: the public projection friends read ("taken", plus a label only when open).
+const state = { settings: null, proposals: [], hangouts: [], participants: new Map(), reservations: [], blocked: [] };
 
 const bySlot = (a, b) =>
   a.date.localeCompare(b.date) || slotIndex(a.slot) - slotIndex(b.slot)
@@ -107,17 +109,19 @@ async function refresh() {
   try {
     const settings = await getDoc(doc(db, 'settings', 'main'));
     if (!settings.exists()) return show('setup');
-    const [proposals, hangouts, participants, blocked] = await Promise.all([
+    const [proposals, hangouts, participants, reservations, blocked] = await Promise.all([
       getDocs(collection(db, 'proposals')),
       getDocs(collection(db, 'hangouts')),
       getDocs(collectionGroup(db, 'participants')),
+      getDocs(collection(db, 'reservations')),
       getDocs(collection(db, 'blocked_slots')),
     ]);
     const rows = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     state.settings = settings.data();
     state.proposals = rows(proposals).sort(bySlot);
     state.hangouts = rows(hangouts).sort(bySlot);
-    state.blocked = rows(blocked).sort(bySlot);
+    state.reservations = rows(reservations).sort(bySlot);
+    state.blocked = rows(blocked);
     state.participants = new Map();
     for (const d of participants.docs) {
       const hangoutId = d.ref.parent.parent.id;
@@ -125,6 +129,7 @@ async function refresh() {
       list.push({ key: d.id, ...d.data() });
       state.participants.set(hangoutId, list);
     }
+    await syncPublic();
     render();
     show('panel');
   } catch (error) {
@@ -134,22 +139,81 @@ async function refresh() {
   }
 }
 
+// ---- What friends may see ----
+
+// Friends never read reservations or private plans. They read `blocked_slots`:
+// one document per taken slot, with a label only if I opened that item. This
+// rebuilds that projection from my data and writes just the differences, so
+// every action in this file can simply change the private data and reload.
+async function syncPublic() {
+  const batch = writeBatch(db);
+  let writes = 0;
+
+  // One-time upgrade of data from before the privacy model: old blocks keep
+  // the label friends already saw (open), old plans become private.
+  if (state.settings.schema !== 2) {
+    for (const b of state.blocked) {
+      if (!b.label || b.kind === 'busy' || state.reservations.some((r) => r.id === b.id)) continue;
+      const reservation = { date: b.date, slot: b.slot, label: b.label, kind: b.kind === 'personal' ? 'personal' : 'block', open: true };
+      batch.set(doc(db, 'reservations', b.id), reservation);
+      state.reservations.push({ id: b.id, ...reservation });
+    }
+    state.reservations.sort(bySlot);
+    for (const h of state.hangouts) {
+      if (typeof h.open === 'boolean') continue;
+      batch.update(doc(db, 'hangouts', h.id), { open: false });
+      h.open = false;
+    }
+    batch.update(doc(db, 'settings', 'main'), { schema: 2 });
+    state.settings.schema = 2;
+    writes += 1;
+  }
+
+  const wanted = new Map();
+  for (const r of state.reservations) {
+    wanted.set(r.id, { date: r.date, slot: r.slot, label: r.open ? r.label : '', kind: r.kind });
+  }
+  for (const h of state.hangouts) {
+    const id = `${h.date}_${h.slot}`;
+    if (!h.open && !wanted.has(id)) wanted.set(id, { date: h.date, slot: h.slot, label: '', kind: 'busy' });
+  }
+  for (const b of state.blocked) {
+    const want = wanted.get(b.id);
+    wanted.delete(b.id);
+    if (!want) batch.delete(doc(db, 'blocked_slots', b.id));
+    else if (want.label !== b.label || want.kind !== b.kind) batch.set(doc(db, 'blocked_slots', b.id), want);
+    else continue;
+    writes += 1;
+  }
+  for (const [id, want] of wanted) {
+    batch.set(doc(db, 'blocked_slots', id), want);
+    writes += 1;
+  }
+  if (writes) await batch.commit();
+}
+
 // ---- First-time setup ----
 
 $('setup-btn').addEventListener('click', () => act(async () => {
   const batch = writeBatch(db);
-  batch.set(doc(db, 'settings', 'main'), { invite_code: randomCode(), trip_start: TRIP.start, trip_end: TRIP.end });
+  batch.set(doc(db, 'settings', 'main'), { invite_code: randomCode(), trip_start: TRIP.start, trip_end: TRIP.end, schema: 2 });
   // A window that started in 1970 is already over, so the first proposal opens a new one.
   batch.set(doc(db, 'counters', 'proposals'), { count: 0, window_start: Timestamp.fromMillis(0), last_id: '' });
   for (const [date, slots, label] of SEED_BLOCKS) {
-    for (const slot of slots) batch.set(doc(db, 'blocked_slots', `${date}_${slot}`), { date, slot, label });
+    // Travel and family days: friends see the label, so they know why.
+    for (const slot of slots) batch.set(doc(db, 'reservations', `${date}_${slot}`), { date, slot, label, kind: 'block', open: true });
   }
   await batch.commit();
 }, 'Calendario creado.'));
 
 // ---- Render ----
 
-const blockAt = (date, slotId) => state.blocked.find((b) => b.id === `${date}_${slotId}`) || null;
+const blockAt = (date, slotId) => state.reservations.find((r) => r.id === `${date}_${slotId}`) || null;
+const setOpen = (collectionName, items, open) => act(async () => {
+  const batch = writeBatch(db);
+  for (const item of items) batch.update(doc(db, collectionName, item.id), { open });
+  await batch.commit();
+}, open ? 'Ahora es abierto: tus amigos lo ven.' : 'Ahora es privado: tus amigos ven «Ocupado».');
 const hangoutsAt = (date, slotId) => state.hangouts.filter((h) => h.date === date && h.slot === slotId);
 const pendingAt = (date, slotId) =>
   state.proposals.filter((p) => p.status === 'pending' && p.date === date && p.slot === slotId);
@@ -179,11 +243,15 @@ function render() {
         sub: namesOf(hangouts[0]).join(', '),
         more: hangouts.length - 1 + waiting.length,
         alert: hangouts.length > 1 || !!block, // two plans, or a plan on reserved time
+        open: hangouts[0].open,
       };
     }
     if (block) {
       const own = block.kind === 'personal';
-      return { status: own ? 'own' : 'off', title: block.label, more: waiting.length, merge: waiting.length ? null : `${own}|${block.label}` };
+      return {
+        status: own ? 'own' : 'off', title: block.label, more: waiting.length, open: block.open,
+        merge: waiting.length ? null : `${own}|${block.open}|${block.label}`,
+      };
     }
     if (waiting.length) return { status: 'wait', title: waiting[0].title, sub: waiting[0].proposer_name, more: waiting.length - 1 };
     if (date < today) return { status: 'gone' };
@@ -203,7 +271,7 @@ function render() {
 
   $('legend').replaceChildren(legend([
     ['free', 'Libre'], ['wait', 'Por confirmar'], ['plan', 'Confirmado'], ['plan is-alert', 'Choque'],
-    ['own', 'Mi tiempo'], ['off', 'Bloqueado'],
+    ['own', 'Mi tiempo'], ['off', 'Bloqueado'], ['own is-open', 'Con punto: abierto, mis amigos lo ven'],
   ]));
 
   $('pending').replaceChildren(...(pending.length ? pending.map(renderPending)
@@ -242,11 +310,20 @@ function proposalText(p) {
   ];
 }
 
-const rejectProposal = (p) => act(() => updateDoc(doc(db, 'proposals', p.id), { status: 'rejected' }), 'Rechazada.');
+// The receipt is how the proposer's device learns the answer: it can be read
+// only by someone who knows the proposal id.
+const rejectProposal = (p) => act(async () => {
+  const batch = writeBatch(db);
+  batch.update(doc(db, 'proposals', p.id), { status: 'rejected' });
+  batch.set(doc(db, 'receipts', p.id), { status: 'rejected' });
+  await batch.commit();
+}, 'Rechazada.');
 
 function pendingActions(p) {
+  const open = el('input', { type: 'checkbox' });
   return el('div', { class: 'actions' },
-    el('button', { type: 'button', class: 'btn primary', onclick: () => approve(p) }, 'Aprobar'),
+    el('label', { class: 'check' }, open, 'Abierto: los demás lo ven y se pueden apuntar'),
+    el('button', { type: 'button', class: 'btn primary', onclick: () => approve(p, open.checked) }, 'Aprobar'),
     el('button', { type: 'button', class: 'btn', onclick: () => openEdit('proposals', p) }, 'Editar'),
     el('button', { type: 'button', class: 'btn text', onclick: () => rejectProposal(p) }, 'Rechazar'));
 }
@@ -262,7 +339,12 @@ function renderRejected(p) {
   return el('article', { class: 'entry' },
     proposalText(p),
     el('div', { class: 'actions' },
-      el('button', { type: 'button', class: 'btn', onclick: () => act(() => updateDoc(doc(db, 'proposals', p.id), { status: 'pending' }), 'Devuelta a por confirmar.') }, 'Volver a considerar'),
+      el('button', { type: 'button', class: 'btn', onclick: () => act(async () => {
+        const batch = writeBatch(db);
+        batch.update(doc(db, 'proposals', p.id), { status: 'pending' });
+        batch.delete(doc(db, 'receipts', p.id));
+        await batch.commit();
+      }, 'Devuelta a por confirmar.') }, 'Volver a considerar'),
       el('button', { type: 'button', class: 'btn text', onclick: () => confirm(`¿Borrar la propuesta «${p.title}»? No se puede deshacer.`) && act(() => deleteDoc(doc(db, 'proposals', p.id)), 'Borrada.') }, 'Borrar')));
 }
 
@@ -304,15 +386,15 @@ function renderPeople(people) {
 
 // Same label on many slots (gym every morning, a whole family day) is one row.
 function renderBlockGroups() {
-  if (!state.blocked.length) return el('p', { class: 'empty' }, 'No tienes nada reservado. Toca un espacio libre del calendario para reservarlo.');
+  if (!state.reservations.length) return el('p', { class: 'empty' }, 'No tienes nada reservado. Toca un espacio libre del calendario para reservarlo.');
   const groups = new Map();
-  for (const b of state.blocked) {
-    const key = `${b.kind === 'personal'}|${b.label}`;
+  for (const b of state.reservations) {
+    const key = `${b.kind === 'personal'}|${b.open}|${b.label}`;
     groups.set(key, [...(groups.get(key) || []), b]);
   }
   const remove = (items, done) => act(async () => {
     const batch = writeBatch(db);
-    for (const b of items) batch.delete(doc(db, 'blocked_slots', b.id));
+    for (const b of items) batch.delete(doc(db, 'reservations', b.id));
     await batch.commit();
   }, done);
   return el('ul', { class: 'groups' }, [...groups.values()].map((items) => {
@@ -327,11 +409,13 @@ function renderBlockGroups() {
       el('details', {},
         el('summary', {},
           el('i', { class: 'swatch is-' + (first.kind === 'personal' ? 'own' : 'off') }),
-          el('strong', {}, first.label), ' ', el('span', { class: 'where' }, where)),
+          el('strong', {}, first.label), ' ', el('span', { class: 'where' }, `${first.open ? 'Abierto' : 'Privado'}, ${where}`)),
         el('ul', {}, items.map((b) => el('li', {},
           el('span', {}, whenText(b)),
           el('button', { type: 'button', class: 'btn text', onclick: () => remove([b], 'Quitado.') }, 'Quitar')))),
       ),
+      el('button', { type: 'button', class: 'btn text', onclick: () => setOpen('reservations', items, !first.open) },
+        first.open ? 'Hacer privado' : 'Hacer abierto'),
       el('button', {
         type: 'button', class: 'btn text',
         onclick: () => (items.length === 1 || confirm(`¿Quitar «${first.label}» de los ${items.length} espacios?`)) && remove(items, 'Quitado.'),
@@ -367,9 +451,10 @@ function renderSheet() {
   if (block) {
     body.push(el('div', { class: 'entry is-' + (block.kind === 'personal' ? 'own' : 'off') },
       el('h3', {}, block.label),
-      el('p', {}, block.kind === 'personal' ? 'Tiempo mío. Mis amigos ven este texto y no pueden proponer aquí.' : 'Bloqueado. Nadie puede proponer aquí.'),
+      el('p', {}, block.open ? 'Abierto: mis amigos ven este texto.' : 'Privado: mis amigos solo ven «Ocupado».'),
       el('div', { class: 'actions' },
-        el('button', { type: 'button', class: 'btn', onclick: () => act(() => deleteDoc(doc(db, 'blocked_slots', block.id)), 'Quitado.') }, 'Quitar reserva'))));
+        el('button', { type: 'button', class: 'btn', onclick: () => setOpen('reservations', [block], !block.open) }, block.open ? 'Hacer privado' : 'Hacer abierto'),
+        el('button', { type: 'button', class: 'btn text', onclick: () => act(() => deleteDoc(doc(db, 'reservations', block.id)), 'Quitado.') }, 'Quitar reserva'))));
   }
   for (const h of hangouts) body.push(renderHangout(h));
   for (const p of waiting) body.push(renderPending(p));
@@ -383,6 +468,7 @@ function renderHangout(h) {
     el('h3', {}, h.title),
     el('p', {}, `Lo propuso ${h.proposer_name}${h.place ? ', en ' + h.place : ''}.`),
     h.note ? el('p', { class: 'note' }, `«${h.note}»`) : null,
+    el('p', {}, h.open ? 'Abierto: mis amigos lo ven y se pueden apuntar.' : 'Privado: los demás solo ven «Ocupado».'),
     el('ul', { class: 'chips', 'aria-label': 'Quién viene' },
       people.map((person) => el('li', {}, person.name,
         el('button', {
@@ -392,6 +478,7 @@ function renderHangout(h) {
         }, '×'))),
       el('li', { class: 'add' }, el('button', { type: 'button', onclick: () => addParticipant(h) }, 'Añadir persona'))),
     el('div', { class: 'actions' },
+      el('button', { type: 'button', class: 'btn', onclick: () => setOpen('hangouts', [h], !h.open) }, h.open ? 'Hacer privado' : 'Hacer abierto'),
       el('button', { type: 'button', class: 'btn', onclick: () => openEdit('hangouts', h) }, 'Editar'),
       el('button', { type: 'button', class: 'btn text', onclick: () => removeHangout(h) }, 'Borrar plan')));
 }
@@ -407,13 +494,17 @@ function reserveForm(date, slot) {
     el('option', { value: 'day' }, 'Este día completo'),
     el('option', { value: 'weekdays' }, `De lunes a viernes, ${lower}, todo el viaje`),
     el('option', { value: 'daily' }, `Todos los días, ${lower}, todo el viaje`));
+  const who = el('select', { name: 'who' },
+    el('option', { value: 'private' }, 'Solo yo. Mis amigos ven «Ocupado»'),
+    el('option', { value: 'open' }, 'Mis amigos ven el texto'),
+    el('option', { value: 'join' }, 'Mis amigos ven el texto y se pueden apuntar'));
   const form = el('form', { class: 'reserve' },
     el('h3', {}, 'Reservar para mí'),
     el('label', {}, '¿Para qué?', label),
     el('div', { class: 'presets' }, PRESETS.map((name) =>
       el('button', { type: 'button', class: 'btn small', onclick: () => { label.value = name; } }, name))),
     el('label', {}, '¿Cuándo?', repeat),
-    el('p', { class: 'hint' }, 'Mis amigos ven el texto y no pueden proponer en esos espacios.'),
+    el('label', {}, '¿Quién lo ve?', who),
     el('button', { type: 'submit', class: 'btn primary' }, 'Reservar'));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -433,10 +524,18 @@ function reserveForm(date, slot) {
     const skipped = targets.length - fresh.length;
     const busy = fresh.filter((t) => hangoutsAt(t.date, t.slot).length).length;
     $('sheet').close();
+    const joinable = who.value === 'join';
     act(async () => {
       const batch = writeBatch(db);
       for (const t of fresh) {
-        batch.set(doc(db, 'blocked_slots', `${t.date}_${t.slot}`), { date: t.date, slot: t.slot, label: text, kind: 'personal' });
+        // Something friends can join is a plan of mine; anything else is reserved time.
+        if (joinable) {
+          batch.set(doc(collection(db, 'hangouts')), {
+            date: t.date, slot: t.slot, title: text, place: '', proposer_name: 'Jose', note: '', open: true, created_at: serverTimestamp(),
+          });
+        } else {
+          batch.set(doc(db, 'reservations', `${t.date}_${t.slot}`), { date: t.date, slot: t.slot, label: text, kind: 'personal', open: who.value === 'open' });
+        }
       }
       await batch.commit();
     }, [
@@ -452,20 +551,21 @@ function reserveForm(date, slot) {
 
 // Approving moves the proposal into `hangouts`, the only collection friends
 // can read, and adds the proposer as the first participant.
-function approve(p) {
+function approve(p, open = false) {
   return act(async () => {
     const batch = writeBatch(db);
     batch.set(doc(db, 'hangouts', p.id), {
       date: p.date, slot: p.slot, title: p.title, place: p.place,
-      proposer_name: p.proposer_name, note: p.note, created_at: p.created_at ?? serverTimestamp(),
+      proposer_name: p.proposer_name, note: p.note, open, created_at: p.created_at ?? serverTimestamp(),
     });
+    batch.set(doc(db, 'receipts', p.id), { status: 'approved' });
     const name = cleanName(p.proposer_name);
     if (name && name !== '.' && name !== '..') {
       batch.set(doc(db, 'hangouts', p.id, 'participants', nameKey(name)), { name, created_at: serverTimestamp() });
     }
     batch.delete(doc(db, 'proposals', p.id));
     await batch.commit();
-  }, 'Aprobado. Tus amigos ya lo ven.');
+  }, open ? 'Aprobado y abierto: tus amigos lo ven.' : `Aprobado. Solo ${p.proposer_name} y tú lo ven.`);
 }
 
 function removeHangout(h) {
@@ -476,6 +576,7 @@ function removeHangout(h) {
       batch.delete(doc(db, 'hangouts', h.id, 'participants', person.key));
     }
     batch.delete(doc(db, 'hangouts', h.id));
+    batch.set(doc(db, 'receipts', h.id), { status: 'rejected' });
     await batch.commit();
   }, 'Plan borrado.');
 }
@@ -592,7 +693,7 @@ function buildIcs(hangouts) {
       'END:VEVENT',
     );
   }
-  for (const b of state.blocked.filter((b) => b.kind === 'personal')) {
+  for (const b of state.reservations.filter((b) => b.kind === 'personal')) {
     const slot = slotById[b.slot];
     if (!slot) continue;
     lines.push(
@@ -610,7 +711,7 @@ function buildIcs(hangouts) {
 }
 
 $('export').addEventListener('click', () => {
-  if (!state.hangouts.length && !state.blocked.some((b) => b.kind === 'personal')) return toast('Todavía no hay planes ni reservas que descargar.');
+  if (!state.hangouts.length && !state.reservations.some((b) => b.kind === 'personal')) return toast('Todavía no hay planes ni reservas que descargar.');
   const blob = new Blob([buildIcs(state.hangouts)], { type: 'text/calendar;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = el('a', { href: url, download: 'cochabamba.ics' });

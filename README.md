@@ -1,8 +1,10 @@
 # bolivia-hangouts
 
 A small shared calendar for a short visit home. You send one private link to
-your friends; they propose hangouts or join existing ones without creating an
-account, and **nothing is visible to anyone until you approve it**.
+your friends; they propose hangouts without creating an account. **Nothing is
+visible to anyone until you approve it, and what you approve stays private
+unless you mark it open**: friends see that a slot is taken, not what you are
+doing or with whom.
 
 Built for a trip to Cochabamba, Bolivia (14 Dec 2026 – 2 Jan 2027). The UI is in
 Spanish. The code is generic enough to reuse for your own trip.
@@ -20,8 +22,8 @@ are used only for display and for the `.ics` export.
 
 | Page | Who | What |
 |---|---|---|
-| `index.html?c=CODE` | Friends | The whole trip as one timetable: a row per day, a column per slot, every cell filled with what is in it. Tap a free slot to propose a plan, tap a confirmed plan to join it. The name is asked for once, in the first form that needs it. |
-| `admin.html` | The host | Google sign-in. The same timetable with pending proposals and clashes marked. Tap a slot to approve, reject or edit what is in it, manage who is coming, or reserve it for yourself (for example the gym on weekday mornings, in one step). Below it: the queue to confirm, who you spend the most time with, your reservations, the invite link and code rotation, and the `.ics` export. |
+| `index.html?c=CODE` | Friends | The trip as a timetable, one week (at most 7 days) on screen, the other weeks a swipe away: a row per day, a column per slot. A friend sees free slots, slots that are taken ("Ocupado"), the plans you marked open, and their own proposals. Tap a free slot to propose a plan, tap an open plan to join it. The name is asked for once, in the first form that needs it. |
+| `admin.html` | The host | Google sign-in. The same timetable with pending proposals and clashes marked. Tap a slot to approve, reject or edit what is in it, manage who is coming, switch an item between private and open, or reserve the slot for yourself (for example the gym on weekday mornings, in one step) and choose who sees it. Below it: the queue to confirm, who you spend the most time with, your reservations, the invite link and code rotation, and the `.ics` export. |
 
 ## Design
 
@@ -46,16 +48,28 @@ Firebase web config.
   rotating the code locks out every old link at once.
 - **Pending is invisible.** Proposals go to the `proposals` collection. Friends
   can create documents there but can never read them, not even their own.
-  Friends can read only `hangouts` and `blocked_slots` (blocks and the host's
-  own reserved time, with the label the host chose), and only the admin can
-  write to them.
   Approving a proposal means the admin copies it into `hangouts`. There is no
   status field a client could flip.
+- **Private unless opened.** Every hangout has an `open` flag, false by
+  default. The rules let a friend read a hangout, and the names of who is
+  coming, only when `open == true`; a query that does not ask for
+  `open == true` is refused outright. The host's own reservations (gym, work)
+  live in `reservations`, which only the admin can read.
+- **What friends get instead.** `blocked_slots` is a public projection with one
+  document per taken slot. It carries a label only for items the host opened;
+  otherwise the label is empty and the page shows "Ocupado". The admin page
+  rebuilds this projection from the private data after every change. A taken
+  slot also refuses new proposals.
+- **Receipts.** `receipts/{proposalId}` holds "approved" or "rejected". It can
+  be fetched only by id, and only the device that sent the proposal knows the
+  id. That is how a proposer sees their own plan as confirmed while everyone
+  else sees "Ocupado". The proposal's text for that view comes from the
+  proposer's own browser storage, not from the server.
 - **Validated writes.** A proposal must have exactly the expected fields,
   `status == 'pending'`, a server timestamp, a valid slot, a date inside the
   trip, trimmed text within the length limits, and a slot that is not blocked.
-- **Joining.** A participant document can be created only under an existing
-  (approved) hangout. Its id is the lower-cased name, so a name is unique per
+- **Joining.** A participant document can be created only under an open
+  hangout. Its id is the lower-cased name, so a name is unique per
   hangout.
 - **Rate limit.** At most 20 proposals per rolling 24 hours across all friends.
   Each proposal must bump `counters/proposals` in the same batch, and the rules
@@ -65,8 +79,9 @@ Firebase web config.
   Firebase console.
 
 Known limits: the honeypot is client-side only; anyone who has the link can
-read the approved calendar and use up the daily proposal quota; and names are
-self-declared. The link is meant for people you trust. Ask friends not to post
+see which slots are taken, read the open plans, and use up the daily proposal
+quota; names are self-declared; and a proposer who clears their browser data
+no longer sees their own private plan (they see "Ocupado" like everyone else). The link is meant for people you trust. Ask friends not to post
 exact addresses.
 
 ## Self-hosting
@@ -104,7 +119,8 @@ INVITE_CODE=xxx npm run test:live       # same checks against the live project
 The live run uses only the public config and anonymous sign-in, exactly like a
 friend's browser, and proves that direct reads and writes fail, a wrong code
 fails, pending proposals never come back, a proposal cannot be created as
-approved, and a pending proposal cannot be joined. It leaves one pending
+approved, a pending proposal cannot be joined, and private plans, their
+participants and reservation labels cannot be read. It leaves one pending
 `[TEST]` proposal for you to delete.
 
 The emulator needs Java 21 or newer with current `firebase-tools`; with Java
@@ -118,8 +134,9 @@ npm run test:e2e                        # both pages against the Firestore + Aut
 node tests/smoke.mjs https://your.site  # start screens of a deployed site
 ```
 
-The end-to-end run covers admin setup, a proposal, approval, joining, the
-people summary, reserving time, the `.ics` export and invite-code rotation. For
+The end-to-end run covers admin setup, a proposal, a private approval (other
+friends see only "Ocupado"), opening it, joining, the people summary, reserving
+time privately and then opening it, the `.ics` export and invite-code rotation. For
 local work, `http://localhost:5500/?emulator` points the pages at the emulators.
 
 ## License

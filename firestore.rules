@@ -5,7 +5,15 @@ rules_version = '2';
 //   members/{uid}. Every read checks that the registered code still equals
 //   settings/main.invite_code, so rotating the code locks out old links.
 // - Pending proposals live in `proposals`, which friends can create but never
-//   read. Only documents in `hangouts` (written by the admin) are visible.
+//   read.
+// - Privacy: a confirmed hangout is private unless the admin marks it open.
+//   Friends can read only hangouts with open == true (and their participants).
+//   For everything else they see `blocked_slots`, a public projection that
+//   says "this slot is taken" and carries a label only when the admin opened
+//   it. The real labels live in `reservations`, which is admin-only.
+// - `receipts/{proposalId}` tells a proposer whether their own proposal was
+//   confirmed. It can be fetched only by id, and only the proposer's device
+//   knows that id.
 // - Admin = signed-in user with a document in `admins`. That collection cannot
 //   be written by any client; add the document in the Firebase console.
 service cloud.firestore {
@@ -70,27 +78,39 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    match /reservations/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    match /receipts/{id} {
+      allow get: if isMember();
+      allow list, write: if isAdmin();
+    }
+
     match /hangouts/{id} {
-      allow read: if isMember() || isAdmin();
+      // A friend's query must itself ask for open == true, or it is refused.
+      allow read: if isAdmin() || (isMember() && resource.data.open == true);
       allow write: if isAdmin();
 
       match /participants/{pid} {
         // The document id is the lower-cased name, which makes names unique
         // per hangout (a second join with the same name is an update: denied).
+        allow read: if isMember()
+          && get(/databases/$(database)/documents/hangouts/$(id)).data.open == true;
         allow create: if isMember()
-          && exists(/databases/$(database)/documents/hangouts/$(id))
+          && get(/databases/$(database)/documents/hangouts/$(id)).data.open == true
           && request.resource.data.keys().hasOnly(['name', 'created_at'])
           && request.resource.data.keys().hasAll(['name', 'created_at'])
           && request.resource.data.created_at == request.time
           && text(request.resource.data.name, 1, 40)
           && pid == request.resource.data.name.lower();
-        allow write: if isAdmin();
+        allow read, write: if isAdmin();
       }
     }
 
-    // Collection-group read, so the page can load all names in one query.
+    // Collection-group read for the admin page (all names in one query).
     match /{path=**}/participants/{pid} {
-      allow read: if isMember() || isAdmin();
+      allow read: if isAdmin();
     }
 
     match /proposals/{id} {

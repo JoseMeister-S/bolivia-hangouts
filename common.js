@@ -139,25 +139,37 @@ export function countdownText(start, end, today) {
   return `Día ${daysBetween(start, today) + 1} de ${daysBetween(start, end) + 1}`;
 }
 
-// The trip as one timetable: a row per day, a column per slot, every cell
-// filled with what is in it. Both pages use it.
+// The trip as a timetable, one week (at most 7 days) on screen at a time:
+// a row per day, a column per slot, every cell filled with what is in it.
+// Weeks sit side by side; swipe sideways or use the week buttons.
 //
-// cellFor(date, slotId) returns { status, title, sub, more, alert, merge }:
+// cellFor(date, slotId) returns { status, title, sub, more, alert, open, merge }:
 //   status  'free' | 'gone' | 'plan' | 'wait' | 'own' | 'off'
 //   merge   neighbouring cells with the same merge key are drawn as one
 //           (an all-day "Navidad en familia" reads once, not four times)
+let shownWeek = null; // survives re-renders, so the view does not jump back
+
 export function renderTimetable({ days, today, cellFor, onPick }) {
-  const rows = [el('div', { class: 'tt-row tt-head', 'aria-hidden': 'true' },
-    el('span'),
-    SLOTS.map((slot) => el('span', { class: 'tt-col' }, slot.label, el('small', {}, slot.start))),
-  )];
-  let month = null;
+  // Weeks run Monday to Sunday.
+  const weeks = [];
   for (const date of days) {
+    const monday = new Date(date + 'T00:00:00Z').getUTCDay() === 1;
+    if (!weeks.length || monday) weeks.push([]);
+    weeks.at(-1).push(date);
+  }
+  if (shownWeek === null) shownWeek = Math.max(0, weeks.findIndex((week) => week.includes(today)));
+  shownWeek = Math.min(shownWeek, weeks.length - 1);
+
+  const weekLabel = (week) => {
+    const first = dayParts(week[0]);
+    const last = dayParts(week.at(-1));
+    return first.month === last.month
+      ? `${first.day} al ${last.day} ${last.month}`
+      : `${first.day} ${first.month} al ${last.day} ${last.month}`;
+  };
+
+  const row = (date) => {
     const parts = dayParts(date);
-    if (parts.monthLong !== month) {
-      month = parts.monthLong;
-      rows.push(el('p', { class: 'tt-month' }, month));
-    }
     const cells = [];
     for (const slot of SLOTS) {
       const cell = { slot, span: 1, ...cellFor(date, slot.id) };
@@ -165,15 +177,14 @@ export function renderTimetable({ days, today, cellFor, onPick }) {
       if (last && cell.merge && last.merge === cell.merge) last.span += 1;
       else cells.push(cell);
     }
-    const monday = new Date(date + 'T00:00:00Z').getUTCDay() === 1;
-    rows.push(el('div', {
-      class: 'tt-row' + (date === today ? ' is-today' : '') + (date < today ? ' is-past' : '') + (monday ? ' week-start' : ''),
+    return el('div', {
+      class: 'tt-row' + (date === today ? ' is-today' : '') + (date < today ? ' is-past' : ''),
       id: 'd-' + date,
     },
       el('span', { class: 'tt-day' }, el('small', {}, parts.weekday), parts.day),
       cells.map((cell) => el('button', {
         type: 'button',
-        class: `tt-cell is-${cell.status}` + (cell.alert ? ' is-alert' : ''),
+        class: `tt-cell is-${cell.status}` + (cell.alert ? ' is-alert' : '') + (cell.open ? ' is-open' : ''),
         style: cell.span > 1 ? `grid-column: span ${cell.span}` : null,
         disabled: cell.status === 'gone',
         'aria-label': `${formatDay(date)}, ${cell.span === SLOTS.length ? 'todo el día' : cell.slot.label}: ${cell.title || 'libre'}`,
@@ -184,9 +195,36 @@ export function renderTimetable({ days, today, cellFor, onPick }) {
         cell.sub ? el('span', { class: 'tt-s' }, cell.sub) : null,
         cell.more ? el('span', { class: 'tt-more' }, `+${cell.more}`) : null,
       )),
-    ));
-  }
-  return el('div', { class: 'tt' }, rows);
+    );
+  };
+
+  const scroller = el('div', { class: 'tt-scroll' }, weeks.map((week) =>
+    el('div', { class: 'tt-week' },
+      el('div', { class: 'tt-row tt-head', 'aria-hidden': 'true' },
+        el('span'),
+        SLOTS.map((slot) => el('span', { class: 'tt-col' }, slot.label, el('small', {}, slot.start)))),
+      week.map(row))));
+
+  const tabs = weeks.map((week, index) => el('button', {
+    type: 'button',
+    class: 'tt-tab',
+    'aria-pressed': String(index === shownWeek),
+    onclick: () => scroller.scrollTo({ left: index * scroller.clientWidth, behavior: 'smooth' }),
+  }, weekLabel(week)));
+
+  // Keep the buttons in step with the swipe position.
+  scroller.addEventListener('scroll', () => {
+    const index = Math.round(scroller.scrollLeft / Math.max(1, scroller.clientWidth));
+    if (index === shownWeek) return;
+    shownWeek = index;
+    tabs.forEach((tab, i) => tab.setAttribute('aria-pressed', String(i === index)));
+  }, { passive: true });
+  // The element is not in the page yet; restore the position once it is.
+  requestAnimationFrame(() => scroller.scrollTo({ left: shownWeek * scroller.clientWidth, behavior: 'instant' }));
+
+  return el('div', { class: 'tt' },
+    el('div', { class: 'tt-tabs', role: 'group', 'aria-label': 'Semana' }, tabs),
+    scroller);
 }
 
 export function legend(items) {

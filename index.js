@@ -2,7 +2,7 @@
 // hangout, tap a confirmed one to join it.
 import { signInAnonymously } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
 import {
-  doc, collection, collectionGroup, getDoc, getDocs, setDoc, writeBatch,
+  doc, collection, getDoc, getDocs, setDoc, writeBatch, query, where,
   serverTimestamp, increment,
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import {
@@ -18,8 +18,9 @@ const state = {
   code: null,
   name: cleanName(store.get('bh_name')),
   settings: null,
-  blocked: new Map(),      // 'date_slot' -> { label, kind } (kind 'personal' = Jose's own time)
-  hangouts: new Map(),     // 'date_slot' -> [hangout]
+  blocked: new Map(),      // 'date_slot' -> { label, kind }: taken slots; label is '' unless Jose opened it
+  hangouts: new Map(),     // 'date_slot' -> [hangout], only the ones Jose marked open
+  receipts: new Map(),     // proposal id -> 'approved' | 'rejected', for proposals sent from this device
   hangoutIds: new Set(),
   participants: new Map(), // hangout id -> [{ name }]
   open: null,              // { date, slotId } of the slot shown in the sheet
@@ -59,41 +60,55 @@ async function start() {
 }
 
 async function load() {
-  const [settings, blocked, hangouts, participants] = await Promise.all([
+  // Friends may read only what Jose marked open. The rules refuse a hangouts
+  // query that does not ask for open == true.
+  const [settings, blocked, hangouts] = await Promise.all([
     getDoc(doc(db, 'settings', 'main')),
     getDocs(collection(db, 'blocked_slots')),
-    getDocs(collection(db, 'hangouts')),
-    getDocs(collectionGroup(db, 'participants')),
+    getDocs(query(collection(db, 'hangouts'), where('open', '==', true))),
   ]);
   state.settings = settings.data();
   state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
   state.hangouts = new Map();
   state.hangoutIds = new Set();
-  for (const d of hangouts.docs) {
+  state.participants = new Map();
+  await Promise.all(hangouts.docs.map(async (d) => {
     const hangout = { id: d.id, ...d.data() };
     const key = `${hangout.date}_${hangout.slot}`;
     state.hangouts.set(key, [...(state.hangouts.get(key) || []), hangout]);
     state.hangoutIds.add(d.id);
-  }
-  state.participants = new Map();
-  for (const d of participants.docs) {
-    const hangoutId = d.ref.parent.parent.id;
-    state.participants.set(hangoutId, [...(state.participants.get(hangoutId) || []), d.data()]);
-  }
-  for (const list of state.participants.values()) {
-    list.sort((a, b) => (a.created_at?.seconds ?? 0) - (b.created_at?.seconds ?? 0));
-  }
+    const names = await getDocs(collection(db, 'hangouts', d.id, 'participants'));
+    state.participants.set(d.id, names.docs.map((p) => p.data())
+      .sort((x, y) => (x.created_at?.seconds ?? 0) - (y.created_at?.seconds ?? 0)));
+  }));
+
+  // What happened to the proposals sent from this device.
+  state.receipts = new Map();
+  await Promise.all(readSent().map(async (p) => {
+    const receipt = await getDoc(doc(db, 'receipts', p.id)).catch(() => null);
+    if (receipt?.exists()) state.receipts.set(p.id, receipt.data().status);
+  }));
 }
 
-// Proposals this device sent that are not confirmed yet. Friends cannot read
-// pending proposals from the server, so this small list lives in localStorage.
+// Proposals sent from this device live in localStorage: friends cannot read
+// proposals from the server, and a confirmed plan stays private unless Jose
+// opens it, so this list is how the proposer still sees their own plan.
+function readSent() {
+  try { return JSON.parse(store.get('bh_sent') || '[]'); } catch { return []; }
+}
+
+// Each kept entry gets a status: 'wait' (no answer yet) or 'mine' (confirmed
+// and private). Rejected ones, and confirmed ones that are now open (they
+// arrive with the open hangouts), are dropped.
 function myPending() {
-  let list = [];
-  try { list = JSON.parse(store.get('bh_sent') || '[]'); } catch { /* ignore */ }
   const cutoff = Date.now() - PENDING_VISIBLE_DAYS * 24 * 3600 * 1000;
-  list = list.filter((p) => !state.hangoutIds.has(p.id) && p.at > cutoff);
+  const list = readSent().filter((p) => {
+    const receipt = state.receipts.get(p.id);
+    if (receipt === 'rejected' || state.hangoutIds.has(p.id)) return false;
+    return receipt === 'approved' || p.at > cutoff;
+  });
   store.set('bh_sent', JSON.stringify(list));
-  return list;
+  return list.map((p) => ({ ...p, status: state.receipts.get(p.id) === 'approved' ? 'mine' : 'wait' }));
 }
 
 const people = (hangout) => state.participants.get(hangout.id) || [];
@@ -128,7 +143,11 @@ function render() {
         more: hangouts.length - 1,
       };
     }
+    const confirmed = mine.find((p) => p.status === 'mine');
+    if (confirmed) return { status: 'plan', title: confirmed.title, sub: 'Confirmado' };
     if (block) {
+      // No label: Jose kept it private, so all a friend learns is "taken".
+      if (!block.label) return { status: 'off', title: 'Ocupado', merge: 'busy' };
       const own = block.kind === 'personal';
       return { status: own ? 'own' : 'off', title: block.label, merge: `${own}|${block.label}` };
     }
@@ -139,15 +158,15 @@ function render() {
   };
   $('tt').replaceChildren(renderTimetable({ days, today, cellFor, onPick: openSlot }));
 
-  const mineCount = [...state.hangouts.values()].flat().filter(isMine).length;
+  const mineCount = [...state.hangouts.values()].flat().filter(isMine).length
+    + pending.filter((p) => p.status === 'mine').length;
   $('summary').textContent = [
     free ? `${free === 1 ? 'Queda' : 'Quedan'} ${plural(free, 'espacio libre', 'espacios libres')}.` : 'Ya no quedan espacios libres.',
     mineCount ? `Tienes ${plural(mineCount, 'plan', 'planes')} con Jose.` : '',
   ].join(' ');
 
   $('legend').replaceChildren(legend([
-    ['free', 'Libre'], ['plan', 'Plan confirmado'], ['wait', 'Tu propuesta, por confirmar'],
-    ['own', 'Jose ocupado'], ['off', 'No disponible'],
+    ['free', 'Libre'], ['plan', 'Plan'], ['wait', 'Tu propuesta, por confirmar'], ['off', 'Ocupado'],
   ]));
 
   $('hello').replaceChildren(...(state.name
@@ -210,13 +229,20 @@ function renderSheet() {
   $('sheet-when').textContent = wholeDay ? 'Todo el día' : `${slot.label}, de ${slot.start} a ${slot.end}`;
 
   const body = [];
-  if (block) {
-    body.push(el('div', { class: 'entry is-' + (block.kind === 'personal' ? 'own' : 'off') },
-      el('h3', {}, block.label),
+  const confirmed = mine.filter((p) => p.status === 'mine');
+  const waiting = mine.filter((p) => p.status === 'wait');
+  for (const p of confirmed) {
+    body.push(el('div', { class: 'entry is-plan' },
+      el('h3', {}, p.title),
+      el('p', {}, 'Jose confirmó tu plan. Solo tú y Jose lo ven.')));
+  }
+  if (block && !confirmed.length) {
+    body.push(el('div', { class: 'entry is-' + (block.label && block.kind === 'personal' ? 'own' : 'off') },
+      el('h3', {}, block.label || 'Ocupado'),
       el('p', {}, 'Jose no está disponible en este espacio.')));
   }
   for (const hangout of hangouts) body.push(renderHangout(hangout, past));
-  for (const p of mine) {
+  for (const p of waiting) {
     body.push(el('div', { class: 'entry is-wait' },
       el('h3', {}, p.title),
       el('p', {}, 'Tu propuesta espera la confirmación de Jose.')));
@@ -276,7 +302,8 @@ function proposeForm(date, slotId, another) {
       el('input', { name: 'place', maxLength: LIMITS.place, placeholder: 'Ej. Zona de la Recoleta' }),
       el('span', { class: 'hint' }, 'Un café o una zona. No pongas direcciones exactas.')),
     el('label', {}, 'Nota para Jose (opcional)',
-      el('textarea', { name: 'note', maxLength: LIMITS.note, rows: 2 })),
+      el('textarea', { name: 'note', maxLength: LIMITS.note, rows: 2 }),
+      el('span', { class: 'hint' }, 'Solo Jose ve tu propuesta. Él decide si los demás ven el plan.')),
     // Honeypot: people never see or fill this field; bots often do.
     el('div', { class: 'hp', 'aria-hidden': 'true' },
       el('label', {}, 'Sitio web', el('input', { name: 'website', tabIndex: -1, autocomplete: 'off' }))),
@@ -308,9 +335,7 @@ function proposeForm(date, slotId, another) {
     error.hidden = true;
     try {
       const id = await sendProposal(data);
-      const sent = myPending();
-      sent.push({ id, date, slot: slotId, title, at: Date.now() });
-      store.set('bh_sent', JSON.stringify(sent));
+      store.set('bh_sent', JSON.stringify([...readSent(), { id, date, slot: slotId, title, at: Date.now() }]));
       $('sheet').close();
       toast('¡Enviado! Jose lo confirma pronto.');
       render();

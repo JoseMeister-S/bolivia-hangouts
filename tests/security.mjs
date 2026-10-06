@@ -12,8 +12,11 @@ import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, signInAnonymously } from 'firebase/auth';
 import {
   getFirestore, doc, collection, collectionGroup, getDoc, getDocs, setDoc,
-  updateDoc, deleteDoc, writeBatch, serverTimestamp, increment, Timestamp,
+  updateDoc, deleteDoc, writeBatch, serverTimestamp, increment, Timestamp, query, where,
 } from 'firebase/firestore';
+
+// What the friends' page asks for: only hangouts the admin marked open.
+const openHangouts = (db) => query(collection(db, 'hangouts'), where('open', '==', true));
 
 const EMULATOR = !!process.env.FIRESTORE_EMULATOR_HOST;
 const results = [];
@@ -95,7 +98,14 @@ async function setup() {
       await setDoc(doc(db, 'admins', 'admin'), {});
       await setDoc(doc(db, 'blocked_slots', '2026-12-25_manana'), { date: '2026-12-25', slot: 'manana', label: 'Navidad en familia' });
       await setDoc(doc(db, 'counters', 'proposals'), { count: 0, window_start: Timestamp.now(), last_id: '' });
-      await setDoc(doc(db, 'hangouts', 'h1'), { date: '2026-12-16', slot: 'noche', title: 'Approved', place: 'Cafe', proposer_name: 'Ana', note: '', created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h1'), { date: '2026-12-16', slot: 'noche', title: 'Open plan', place: 'Cafe', proposer_name: 'Ana', note: '', open: true, created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h1', 'participants', 'ana'), { name: 'Ana', created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h2'), { date: '2026-12-19', slot: 'noche', title: 'SECRET private party', place: 'Somewhere', proposer_name: 'Jose', note: '', open: false, created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h2', 'participants', 'eva'), { name: 'SECRET Eva', created_at: Timestamp.now() });
+      await setDoc(doc(db, 'blocked_slots', '2026-12-19_noche'), { date: '2026-12-19', slot: 'noche', label: '', kind: 'busy' });
+      await setDoc(doc(db, 'reservations', '2026-12-15_manana'), { date: '2026-12-15', slot: 'manana', label: 'SECRET gym', kind: 'personal', open: false });
+      await setDoc(doc(db, 'blocked_slots', '2026-12-15_manana'), { date: '2026-12-15', slot: 'manana', label: '', kind: 'personal' });
+      await setDoc(doc(db, 'receipts', 'p-known'), { status: 'approved' });
       await setDoc(doc(db, 'proposals', 'p1'), { date: '2026-12-17', slot: 'noche', title: 'SECRET pending', place: 'Cafe', proposer_name: 'Luis', note: '', status: 'pending', created_at: Timestamp.now() });
       await setDoc(doc(db, 'proposals', 'p2'), { date: '2026-12-17', slot: 'tarde', title: 'SECRET rejected', place: 'Cafe', proposer_name: 'Luis', note: '', status: 'rejected', created_at: Timestamp.now() });
     });
@@ -137,26 +147,38 @@ const { good, bad, stranger, code } = ctx;
 console.log(`\nMode: ${EMULATOR ? 'emulator' : 'LIVE project (anonymous clients only)'}\n`);
 
 console.log('--- A client with no invite code gets nothing');
-for (const name of ['hangouts', 'blocked_slots', 'proposals', 'members', 'settings', 'admins', 'counters']) {
+for (const name of ['hangouts', 'blocked_slots', 'proposals', 'members', 'settings', 'admins', 'counters', 'reservations', 'receipts']) {
   await denied(`no code: list ${name}`, () => getDocs(collection(stranger.db, name)));
 }
 await denied('no code: read settings/main (invite code)', () => getDoc(doc(stranger.db, 'settings', 'main')));
+await denied('no code: list open hangouts', () => getDocs(openHangouts(stranger.db)));
 await denied('no code: read all participants', () => getDocs(collectionGroup(stranger.db, 'participants')));
+await denied('no code: read a receipt', () => getDoc(doc(stranger.db, 'receipts', 'p-known')));
 await denied('no code: write a hangout', () => setDoc(doc(collection(stranger.db, 'hangouts')), { title: 'x' }));
 await denied('no code: propose', () => propose(stranger.db));
 
 console.log('--- A wrong invite code fails');
 await denied('wrong code: register', () => setDoc(doc(bad.db, 'members', bad.uid), { code: 'not-the-code' }));
-await denied('wrong code: list hangouts', () => getDocs(collection(bad.db, 'hangouts')));
+await denied('wrong code: list open hangouts', () => getDocs(openHangouts(bad.db)));
 await denied('wrong code: list blocked slots', () => getDocs(collection(bad.db, 'blocked_slots')));
 await denied('wrong code: propose', () => propose(bad.db));
 await denied('register under another uid', () => setDoc(doc(bad.db, 'members', good.uid), { code }));
 
 console.log('--- A friend with the right code');
 await allowed('right code: register', () => setDoc(doc(good.db, 'members', good.uid), { code }));
-const hangoutsBefore = await allowed('read approved hangouts', () => getDocs(collection(good.db, 'hangouts')));
-await allowed('read blocked slots', () => getDocs(collection(good.db, 'blocked_slots')));
-await allowed('read participants', () => getDocs(collectionGroup(good.db, 'participants')));
+const hangoutsBefore = await allowed('read open hangouts', () => getDocs(openHangouts(good.db)));
+await allowed('read blocked slots (the public "taken" markers)', () => getDocs(collection(good.db, 'blocked_slots')));
+
+console.log('--- Privacy: private plans and reservation labels stay with the admin');
+await denied('friend cannot list all hangouts (would include private ones)', () => getDocs(collection(good.db, 'hangouts')));
+await denied('friend cannot ask for private hangouts', () => getDocs(query(collection(good.db, 'hangouts'), where('open', '==', false))));
+await denied('friend cannot read all participants', () => getDocs(collectionGroup(good.db, 'participants')));
+await denied('friend cannot list reservations (real labels)', () => getDocs(collection(good.db, 'reservations')));
+await denied('friend cannot read one reservation', () => getDoc(doc(good.db, 'reservations', '2026-12-15_manana')));
+await denied('friend cannot list receipts', () => getDocs(collection(good.db, 'receipts')));
+await denied('friend cannot write a receipt', () => setDoc(doc(good.db, 'receipts', 'x'), { status: 'approved' }));
+await denied('friend cannot write a reservation', () => setDoc(doc(good.db, 'reservations', '2026-12-20_tarde'), { label: 'x' }));
+console.log('--- A friend with the right code (continued)');
 await denied('friend cannot list proposals (pending/rejected)', () => getDocs(collection(good.db, 'proposals')));
 await denied('friend cannot list members', () => getDocs(collection(good.db, 'members')));
 await denied('friend cannot write a hangout directly', () => setDoc(doc(collection(good.db, 'hangouts')), { ...baseProposal(), status: 'approved' }));
@@ -191,10 +213,11 @@ if (mine) {
     setDoc(doc(good.db, 'hangouts', mine.id, 'participants', 'tester'), { name: 'Tester', created_at: serverTimestamp() }));
   await denied('cannot add participants under proposals/', () =>
     setDoc(doc(good.db, 'proposals', mine.id, 'participants', 'tester'), { name: 'Tester', created_at: serverTimestamp() }));
-  const after = await allowed('re-read approved hangouts', () => getDocs(collection(good.db, 'hangouts')));
+  const after = await allowed('re-read open hangouts', () => getDocs(openHangouts(good.db)));
+  await allowed('proposer can fetch the receipt of their own proposal by id', () => getDoc(doc(good.db, 'receipts', mine.id)));
   if (after && hangoutsBefore) {
-    const leaked = after.docs.some((d) => d.id === mine.id || d.data().status === 'pending' || d.data().status === 'rejected');
-    record(!leaked && after.size === hangoutsBefore.size, 'calendar contains no pending or rejected item');
+    const leaked = after.docs.some((d) => d.id === mine.id || d.data().open !== true || d.data().status === 'pending' || d.data().status === 'rejected');
+    record(!leaked && after.size === hangoutsBefore.size, 'calendar contains no pending, rejected or private item');
   }
 }
 
@@ -205,6 +228,19 @@ if (EMULATOR) {
   await denied('friend cannot read a seeded rejected proposal', () => getDoc(doc(good.db, 'proposals', 'p2')));
   await denied('cannot join the seeded pending proposal', () =>
     setDoc(doc(good.db, 'hangouts', 'p1', 'participants', 'ana'), { name: 'Ana', created_at: serverTimestamp() }));
+  const open = await allowed('open-hangouts query succeeds', () => getDocs(openHangouts(good.db)));
+  record(!!open && open.size === 1 && open.docs[0].id === 'h1', 'the private hangout is absent from the result');
+  await denied('friend cannot read a private hangout by id', () => getDoc(doc(good.db, 'hangouts', 'h2')));
+  await denied('friend cannot read who goes to a private hangout', () => getDocs(collection(good.db, 'hangouts', 'h2', 'participants')));
+  await denied('friend cannot join a private hangout', () =>
+    setDoc(doc(good.db, 'hangouts', 'h2', 'participants', 'ana'), { name: 'Ana', created_at: serverTimestamp() }));
+  await denied('friend cannot propose on a slot taken by a private plan', () => propose(good.db, { date: '2026-12-19', slot: 'noche' }));
+  await denied('friend cannot propose on privately reserved time', () => propose(good.db, { date: '2026-12-15', slot: 'manana' }));
+  const taken = await allowed('friend reads the public marker of the reserved slot', () => getDoc(doc(good.db, 'blocked_slots', '2026-12-15_manana')));
+  record(!!taken && taken.data().label === '', 'the public marker carries no label');
+  await allowed('friend reads who goes to an open hangout', () => getDocs(collection(good.db, 'hangouts', 'h1', 'participants')));
+  const receipt = await allowed('receipt can be fetched by a known id', () => getDoc(doc(good.db, 'receipts', 'p-known')));
+  record(!!receipt && receipt.data().status === 'approved', 'receipt says approved');
   await allowed('join an approved hangout', () =>
     setDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'maría'), { name: 'María', created_at: serverTimestamp() }));
   await denied('same name again (different case) is rejected', () =>
@@ -226,15 +262,18 @@ if (EMULATOR) {
 
   await allowed('admin reads pending proposals', () => getDocs(collection(admin.db, 'proposals')));
   await allowed('admin approves (writes a hangout)', () =>
-    setDoc(doc(admin.db, 'hangouts', 'p1'), { date: '2026-12-17', slot: 'noche', title: 'Now approved', place: 'Cafe', proposer_name: 'Luis', note: '', created_at: serverTimestamp() }));
+    setDoc(doc(admin.db, 'hangouts', 'p1'), { date: '2026-12-17', slot: 'noche', title: 'Now approved', place: 'Cafe', proposer_name: 'Luis', note: '', open: false, created_at: serverTimestamp() }));
+  await denied('a newly approved plan is private until the admin opens it', () => getDoc(doc(good.db, 'hangouts', 'p1')));
+  await allowed('admin opens the plan', () => updateDoc(doc(admin.db, 'hangouts', 'p1'), { open: true }));
+  await allowed('now the friend can read it', () => getDoc(doc(good.db, 'hangouts', 'p1')));
   await denied('even the admin cannot add admins from a client', () => setDoc(doc(admin.db, 'admins', 'someone'), {}));
 
   await allowed('admin rotates the invite code', () => updateDoc(doc(admin.db, 'settings', 'main'), { invite_code: 'NEWCODE' }));
-  await denied('old code: list hangouts after rotation', () => getDocs(collection(good.db, 'hangouts')));
+  await denied('old code: list open hangouts after rotation', () => getDocs(openHangouts(good.db)));
   await denied('old code: propose after rotation', () => propose(good.db));
   await denied('old code: re-register with the old code', () => setDoc(doc(good.db, 'members', good.uid), { code: 'GOODCODE' }));
   await allowed('new code: register again', () => setDoc(doc(good.db, 'members', good.uid), { code: 'NEWCODE' }));
-  await allowed('new code: list hangouts', () => getDocs(collection(good.db, 'hangouts')));
+  await allowed('new code: list open hangouts', () => getDocs(openHangouts(good.db)));
 }
 
 await ctx.cleanup();

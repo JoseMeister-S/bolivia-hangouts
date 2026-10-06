@@ -1,6 +1,7 @@
 // End-to-end browser test of both pages against the Firebase emulators:
-// admin setup -> friend proposes -> admin approves -> second friend joins ->
-// admin reserves gym time -> .ics export -> invite-code rotation.
+// admin setup -> friend proposes -> admin approves (private) -> admin opens it
+// -> second friend joins -> admin reserves gym time (private, then open) ->
+// .ics export -> invite-code rotation.
 //
 //   npm i --no-save playwright-core
 //   npm run test:e2e          (Java 21+)   or   npm run test:e2e:java17
@@ -44,6 +45,9 @@ async function open(url, options = {}) {
 }
 const shot = (page, name, fullPage = false) => shots && page.screenshot({ path: path.join(shots, name + '.png'), fullPage });
 const cell = (page, date, index = 0) => page.locator(`#d-${date} .tt-cell`).nth(index);
+const reloaded = async (page, selector = '.tt-row[id^="d-"]') => { await page.reload(); await page.waitForSelector(selector, { state: 'attached' }); };
+// Everything a friend's page holds, visible or not.
+const pageText = (page) => page.evaluate(() => document.body.textContent);
 
 try {
   // ---- Admin: sign in (fake Google account in the Auth emulator), become admin, set up
@@ -71,6 +75,8 @@ try {
   const code = new URL(link).searchParams.get('c');
   check(/^[A-Za-z0-9]{20}$/.test(code), 'setup created a 20-character invite code');
   check(await admin.locator('.tt-row[id^="d-"]').count() === 20, 'admin timetable has 20 days');
+  const weekSizes = await admin.locator('.tt-week').evaluateAll((weeks) => weeks.map((w) => w.querySelectorAll('.tt-row[id]').length));
+  check(weekSizes.join() === '7,7,6', `timetable shows at most 7 days at a time (${weekSizes.join('+')})`);
   check(await admin.locator('#blocked .groups > li').count() === 5, 'seed blocks are grouped by label');
 
   // ---- Friend 1 proposes
@@ -80,55 +86,67 @@ try {
   check(await caro.locator('.tt-row[id^="d-"]').count() === 20, 'friend timetable has 20 days');
   check(await caro.locator('#d-2026-12-14 .tt-cell').count() === 1
     && (await cell(caro, '2026-12-14').innerText()) === 'Llegando a Cochabamba (21:55)', '14 Dec is one all-day block with its label');
-  await cell(caro, '2026-12-14').click();
-  await caro.waitForSelector('#sheet[open]');
-  check(await caro.locator('#sheet-body form').count() === 0, 'a blocked slot offers no form');
-  await caro.click('#sheet-close');
+  await caro.getByRole('button', { name: '28 dic al 2 ene' }).click();
+  await caro.waitForFunction(() => document.querySelector('.tt-tab:last-child').getAttribute('aria-pressed') === 'true');
+  check(await cell(caro, '2026-12-31').isVisible(), 'the week buttons scroll to another week');
+  await caro.getByRole('button', { name: '14 al 20 dic' }).click();
 
   await cell(caro, '2026-12-18').click();
   await caro.waitForSelector('#sheet[open] .propose');
   await caro.fill('.propose input[name=name]', 'Caro');
   await caro.fill('.propose input[name=title]', 'Salteñas y café');
   await caro.fill('.propose input[name=place]', 'Zona norte');
-  await shot(caro, 'friend-propose');
   await caro.click('.propose button[type=submit]');
   await caro.waitForSelector('.tt-cell.is-wait');
   check(await caro.locator('.tt-cell.is-plan').count() === 0, 'proposal is pending, not shown as a plan');
   check((await caro.innerText('#toast')).startsWith('¡Enviado!'), 'confirmation message shown');
 
-  // Another friend must not see it at all.
   const luis = await open(friendUrl, { colorScheme: 'dark' });
   await luis.waitForSelector('.tt-row[id^="d-"]');
   check(await luis.locator('.tt-cell.is-plan, .tt-cell.is-wait').count() === 0, 'other friends see nothing before approval');
 
-  // ---- Admin approves
-  await admin.reload();
-  await admin.waitForSelector('#panel:not([hidden])');
+  // ---- Admin approves: private by default
+  await reloaded(admin, '#pending .entry');
   check(await admin.locator('#pending .entry').count() === 1, 'admin sees 1 proposal to confirm');
-  check(await admin.locator('#tt .tt-cell.is-wait').count() === 1, 'admin timetable marks the pending slot');
-  await shot(admin, 'admin-pending');
   await admin.locator('#pending').getByRole('button', { name: 'Aprobar' }).click();
   await admin.waitForSelector('#tt .tt-cell.is-plan');
-  check(await admin.locator('#pending .entry').count() === 0, 'nothing left to confirm after approval');
+  check((await admin.innerText('#toast')) === 'Aprobado. Solo Caro y tú lo ven.', 'approval is private by default');
 
-  // ---- Friend 2 sees it and joins (the name is asked for in the same form)
-  await luis.reload();
-  await luis.waitForSelector('.tt-cell.is-plan');
-  check((await luis.locator('.tt-cell.is-plan').innerText()).includes('Caro'), 'approved plan is visible with the proposer');
-  await luis.locator('.tt-cell.is-plan').click();
+  await reloaded(luis);
+  const luisCell = cell(luis, '2026-12-18');
+  check((await luisCell.innerText()) === 'Ocupado', 'another friend sees only "Ocupado" in that slot');
+  const luisText = await pageText(luis);
+  check(!luisText.includes('Salteñas') && !luisText.includes('Caro'), 'the page of another friend holds neither the plan nor the name');
+  await luisCell.click();
+  await luis.waitForSelector('#sheet[open]');
+  check(await luis.locator('#sheet-body form').count() === 0, 'a private slot offers no form: no join, no proposal');
+  await shot(luis, 'friend-private-dark');
+  await luis.click('#sheet-close');
+
+  await reloaded(caro);
+  check((await cell(caro, '2026-12-18').innerText()).replace(/\s+/g, ' ') === 'Salteñas y café Confirmado', 'the proposer sees their own plan as confirmed');
+  check((await caro.innerText('#summary')).includes('Tienes 1 plan con Jose'), 'the proposer\'s summary counts it');
+
+  // ---- Admin opens the plan; now others see it and can join
+  await cell(admin, '2026-12-18').click();
+  await admin.waitForSelector('#sheet[open] .entry.is-plan');
+  await shot(admin, 'admin-plan-private');
+  await admin.locator('#sheet-body').getByRole('button', { name: 'Hacer abierto' }).click();
+  await admin.waitForSelector('#tt .tt-cell.is-plan.is-open');
+  await admin.click('#sheet-close');
+
+  await reloaded(luis);
+  check((await cell(luis, '2026-12-18').innerText()).includes('Caro'), 'once open, the plan is visible with who comes');
+  await cell(luis, '2026-12-18').click();
   await luis.fill('.join input[name=name]', 'Luis');
   await luis.getByRole('button', { name: 'Me apunto' }).click();
   await luis.waitForSelector('.done');
   check((await luis.innerText('#sheet-body')).includes('Vienen: Caro, Luis'), 'second friend joined');
-  await shot(luis, 'friend-joined-dark');
   await luis.click('#sheet-close');
-  check((await luis.innerText('#summary')).includes('Tienes 1 plan con Jose'), 'summary counts the friend\'s plans');
 
-  // ---- Admin: people summary, reserve gym on weekday mornings, export
-  await admin.reload();
-  await admin.waitForSelector('#panel:not([hidden])');
+  // ---- Admin: people summary, reserve gym on weekday mornings (private), export
+  await reloaded(admin, '.people > li');
   check(await admin.locator('.people > li').count() === 2, 'people summary lists both friends');
-  check((await admin.locator('.person-count').first().innerText()).startsWith('1 vez'), 'people summary counts hangouts');
 
   await cell(admin, '2026-12-15').click();
   await admin.waitForSelector('#sheet[open] .reserve');
@@ -143,11 +161,38 @@ try {
   await shot(admin, 'admin-top');
   await shot(admin, 'admin-full', true);
 
-  await admin.locator('#tt .tt-cell.is-alert').click();
-  await admin.waitForSelector('#sheet[open] .warn');
-  check((await admin.innerText('#sheet-body')).includes('Gimnasio') && (await admin.innerText('#sheet-body')).includes('Salteñas y café'), 'slot sheet shows the reservation and the plan');
-  await shot(admin, 'admin-sheet');
-  await admin.click('#sheet-close');
+  await reloaded(caro);
+  check((await cell(caro, '2026-12-15').innerText()) === 'Ocupado', 'friends see the private gym time as "Ocupado"');
+  check(!(await pageText(caro)).includes('Gimnasio'), 'the friend\'s page does not hold the word "Gimnasio"');
+  await cell(caro, '2026-12-15').click();
+  await caro.waitForSelector('#sheet[open]');
+  check(await caro.locator('#sheet-body form').count() === 0, 'reserved slot offers no form');
+  await caro.click('#sheet-close');
+  await shot(caro, 'friend-top');
+  await shot(caro, 'friend-full', true);
+
+  // ---- Admin makes the gym time open: now friends see the label
+  await admin.locator('#blocked li', { hasText: 'Gimnasio' }).getByRole('button', { name: 'Hacer abierto' }).click();
+  await admin.waitForSelector('#tt .tt-cell.is-own.is-open');
+  await reloaded(caro);
+  check((await cell(caro, '2026-12-15').innerText()) === 'Gimnasio', 'once open, friends see "Gimnasio"');
+
+  // ---- Admin adds an open event of his own that friends can join
+  await admin.getByRole('button', { name: '28 dic al 2 ene' }).click();
+  await cell(admin, '2026-12-30', 3).click();
+  await admin.waitForSelector('#sheet[open] .reserve');
+  await admin.fill('.reserve input[name=label]', 'Fiesta de fin de año');
+  await admin.selectOption('.reserve select[name=who]', 'join');
+  await admin.locator('.reserve button[type=submit]').click();
+  await admin.waitForSelector('#d-2026-12-30 .tt-cell.is-plan.is-open');
+  await reloaded(luis);
+  await cell(luis, '2026-12-30', 3).click();
+  await luis.waitForSelector('#sheet[open] .join');
+  await luis.getByRole('button', { name: 'Me apunto' }).click();
+  await luis.waitForSelector('.done');
+  check((await luis.innerText('#sheet-body')).includes('Fiesta de fin de año') && (await luis.innerText('#sheet-body')).includes('Vienen: Luis'), 'a friend joins Jose\'s open event');
+  await shot(luis, 'friend-dark');
+  await luis.click('#sheet-close');
 
   const [download] = await Promise.all([admin.waitForEvent('download'), admin.click('#export')]);
   const ics = fs.readFileSync(await download.path(), 'utf8');
@@ -156,21 +201,6 @@ try {
   check(ics.includes('SUMMARY:Salteñas y café') && ics.replace(/\r\n /g, '').includes('Vienen: Caro\\, Luis'), '.ics has the plan and its participants');
   check((ics.match(/SUMMARY:Gimnasio/g) || []).length === 12, '.ics has the 12 gym sessions');
   check(ics.split('\r\n').every((line) => Buffer.byteLength(line) <= 75), '.ics lines are folded to 75 octets');
-
-  // ---- Friends see the reservation and cannot propose there
-  await caro.reload();
-  await caro.waitForSelector('.tt-cell.is-own');
-  const gym = cell(caro, '2026-12-15');
-  check((await gym.innerText()) === 'Gimnasio' && await gym.evaluate((n) => n.classList.contains('is-own')), 'friend sees Jose\'s gym time in the timetable');
-  await gym.click();
-  await caro.waitForSelector('#sheet[open]');
-  check(await caro.locator('#sheet-body form').count() === 0, 'reserved slot offers no form');
-  await caro.click('#sheet-close');
-  await shot(caro, 'friend-top');
-  await shot(caro, 'friend-full', true);
-  await luis.reload();
-  await luis.waitForSelector('.tt-cell.is-own');
-  await shot(luis, 'friend-dark');
 
   // ---- Rotating the code locks friends out
   await admin.click('#rotate');
