@@ -134,7 +134,8 @@ dialog .actions { justify-content: flex-end; }
 
 /* ---- Day cards ---- */
 
-.day h2 { text-transform: capitalize; margin-bottom: 4px; }
+.day h2 { margin-bottom: 4px; }
+.day h2::first-letter, .when::first-letter { text-transform: uppercase; }
 .day.past { opacity: .55; }
 
 .slot {
@@ -213,7 +214,7 @@ input, textarea, select {
 }
 textarea { resize: vertical; }
 
-.when { color: var(--muted); text-transform: capitalize; }
+.when { color: var(--muted); }
 .error { color: var(--danger); }
 
 /* Honeypot: off-screen, not display:none, so simple bots still fill it. */
