@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light dark">
+  <title>Jose en Cochabamba</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="hero">
+    <h1>Jose en Cochabamba</h1>
+    <p class="sub" id="trip-range">14 de diciembre – 2 de enero</p>
+  </header>
+
+  <main id="main">
+    <p class="status" id="status">Cargando…</p>
+
+    <section id="gate" class="card center" hidden>
+      <h2>Pídele el enlace a Jose</h2>
+      <p>Esta página solo se abre con el enlace que Jose manda por WhatsApp.</p>
+    </section>
+
+    <section id="calendar" hidden>
+      <div class="toolbar">
+        <p id="hello"></p>
+        <button type="button" class="btn whatsapp" id="share">Compartir por WhatsApp</button>
+      </div>
+      <p class="notice">
+        Elige un espacio libre y propón un plan, o apúntate a uno que ya esté confirmado.
+        Jose confirma cada propuesta antes de que aparezca aquí.
+        <strong>No pongas direcciones exactas.</strong>
+      </p>
+      <div id="days"></div>
+    </section>
+  </main>
+
+  <footer class="foot">Horarios en hora de Bolivia.</footer>
+
+  <dialog id="name-dialog">
+    <form method="dialog" id="name-form">
+      <h2>¿Cómo te llamas?</h2>
+      <p>Así Jose y los demás saben quién eres.</p>
+      <label>Tu nombre
+        <input name="name" maxlength="40" required autocomplete="given-name" placeholder="Ej. Caro">
+      </label>
+      <div class="actions">
+        <button type="submit" class="btn primary">Listo</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="propose-dialog">
+    <form method="dialog" id="propose-form">
+      <h2>Proponer plan</h2>
+      <p class="when" id="propose-when"></p>
+      <label>¿Qué hacemos?
+        <input name="title" maxlength="80" required placeholder="Ej. Café y ponernos al día">
+      </label>
+      <label>¿Dónde? <span class="hint">(un café o una zona, no una dirección)</span>
+        <input name="place" maxlength="80" placeholder="Ej. Zona de la Recoleta">
+      </label>
+      <label>Nota para Jose <span class="hint">(opcional)</span>
+        <textarea name="note" maxlength="280" rows="3"></textarea>
+      </label>
+      <!-- Honeypot: people never see or fill this field; bots often do. -->
+      <div class="hp" aria-hidden="true">
+        <label>Sitio web <input name="website" tabindex="-1" autocomplete="off"></label>
+      </div>
+      <p class="error" id="propose-error" hidden></p>
+      <div class="actions">
+        <button type="button" class="btn" id="propose-cancel">Cancelar</button>
+        <button type="submit" class="btn primary" id="propose-send">Enviar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="index.js"></script>
+</body>
+</html>

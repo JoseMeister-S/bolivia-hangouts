@@ -1,0 +1,19 @@
+{
+  "name": "bolivia-hangouts",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Shared hangout calendar: friends propose, the host approves. Static page + Firebase.",
+  "scripts": {
+    "serve": "npx --yes http-server . -p 5500 -c-1",
+    "test:rules:java17": "npx --yes firebase-tools@13.35.1 emulators:exec --only firestore --project demo-bolivia-hangouts \"node tests/security.mjs\"",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-bolivia-hangouts \"node tests/security.mjs\"",
+    "test:live": "node tests/security.mjs",
+    "deploy:rules": "firebase deploy --only firestore:rules"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.0",
+    "firebase": "^12.19.0",
+    "firebase-tools": "^15.32.1"
+  }
+}
