@@ -47,7 +47,7 @@ async function open(path, options = {}) {
 if (code) {
   for (const colorScheme of ['light', 'dark']) {
     const { page, errors } = await open('/?c=' + encodeURIComponent(code), { colorScheme });
-    await page.waitForSelector('.tt-row[id^="d-"]', { timeout: 20000 });
+    await page.waitForSelector('#calendar[aria-busy="false"]', { timeout: 20000 });
     check(await page.locator('.tt-row[id^="d-"]').count() === 20, `${colorScheme}: timetable has 20 days`);
     check((await page.locator('#d-2026-12-14 .tt-cell').first().innerText()) === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
     check(await page.evaluate(() => document.fonts.check('16px "Bricolage Grotesque"')), `${colorScheme}: the typeface loaded`);
@@ -61,7 +61,7 @@ if (code) {
       await page.waitForSelector('.tt-cell.is-wait', { timeout: 20000 });
       check((await page.locator('#toast').innerText()).startsWith('¡Enviado!'), 'proposal sent, confirmation shown');
       await page.reload();
-      await page.waitForSelector('.tt-row[id^="d-"]');
+      await page.waitForSelector('#calendar[aria-busy="false"]');
       check(await page.locator('.tt-cell.is-plan', { hasText: '[TEST] smoke' }).count() === 0, 'pending proposal is not shown as a plan');
     }
     check(errors.length === 0, `${colorScheme}: no script errors ` + errors.join(' | '));

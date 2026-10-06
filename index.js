@@ -4,7 +4,7 @@ import { signInAnonymously } from 'https://www.gstatic.com/firebasejs/12.19.0/fi
 import {
   doc, collection, getDoc, getDocs, setDoc, writeBatch, query, where,
   serverTimestamp, increment,
-} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js';
 import {
   auth, db, SLOTS, slotById, LIMITS, tripDays, formatDay, todayInBolivia, el, clean,
   cleanName, nameKey, store, friendLink, whatsappUrl, toast, renderTimetable, legend,
@@ -37,26 +37,100 @@ function showGate() {
   $('gate').hidden = false;
 }
 
+// fresh = false while the timetable on screen is the saved copy from the
+// last visit and the current data is still on its way.
+function showCalendar(fresh) {
+  $('status').hidden = true;
+  $('gate').hidden = true;
+  $('calendar').hidden = false;
+  $('calendar').setAttribute('aria-busy', String(!fresh));
+  render();
+}
+
+// The last timetable this device loaded. It is shown at once on the next
+// visit while the fresh data arrives. It holds only what this friend was
+// allowed to read.
+const CACHE = 'bh_cache';
+
+function saveCache() {
+  store.set(CACHE, JSON.stringify({
+    code: state.code,
+    settings: { trip_start: state.settings.trip_start, trip_end: state.settings.trip_end },
+    blocked: [...state.blocked],
+    hangouts: [...state.hangouts],
+    participants: [...state.participants],
+    receipts: [...state.receipts],
+  }));
+}
+
+function readCache() {
+  try {
+    const cache = JSON.parse(store.get(CACHE) || 'null');
+    if (!cache || cache.code !== state.code) return false;
+    state.settings = cache.settings;
+    state.blocked = new Map(cache.blocked);
+    state.hangouts = new Map(cache.hangouts);
+    state.hangoutIds = new Set([...state.hangouts.values()].flat().map((h) => h.id));
+    state.participants = new Map(cache.participants);
+    state.receipts = new Map(cache.receipts);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Sign in (anonymously, no prompt) and register the invite code for this
+// device. A wrong code is refused by the rules. Returns false when this
+// device was already registered with this code, which saves a round trip.
+async function connect() {
+  await auth.authStateReady();
+  if (!auth.currentUser) await signInAnonymously(auth);
+  const key = `${auth.currentUser.uid}|${state.code}`;
+  if (store.get('bh_reg') === key) return false;
+  try {
+    await setDoc(doc(db, 'members', auth.currentUser.uid), { code: state.code });
+    store.set('bh_reg', key);
+  } catch { /* wrong code: the load below fails and shows the gate */ }
+  return true;
+}
+
+// Resolves once this device is signed in and has fresh data. Writes wait for it.
+let ready = Promise.resolve();
+
 async function start() {
   if (!state.code) return showGate();
+  const cached = readCache();
+  if (cached) showCalendar(false);
+
+  ready = (async () => {
+    const registered = await connect();
+    try {
+      await load();
+    } catch (error) {
+      // "Already registered" was remembered locally but is no longer true on the server.
+      if (error.code !== 'permission-denied' || registered) throw error;
+      store.remove('bh_reg');
+      await connect();
+      await load();
+    }
+  })();
+
   try {
-    await auth.authStateReady();
-    if (!auth.currentUser) await signInAnonymously(auth);
-    // Register the code for this device. A wrong code is refused by the rules.
-    await setDoc(doc(db, 'members', auth.currentUser.uid), { code: state.code }).catch(() => {});
-    await load();
+    await ready;
   } catch (error) {
     if (error.code === 'permission-denied') {
+      store.remove(CACHE);
+      store.remove('bh_reg');
       if (!urlCode) store.remove('bh_code');
       return showGate();
     }
     console.error(error);
+    if (cached) return toast('No hay conexión. Ves la última versión guardada.');
     $('status').textContent = 'No se pudo cargar el calendario. Revisa tu conexión y recarga la página.';
     return;
   }
-  $('status').hidden = true;
-  $('calendar').hidden = false;
-  render();
+  saveCache();
+  showCalendar(true);
 }
 
 async function load() {
@@ -277,6 +351,7 @@ async function join(event, hangout) {
   const button = form.querySelector('button');
   button.disabled = true;
   try {
+    await ready.catch(() => {});
     await setDoc(doc(db, 'hangouts', hangout.id, 'participants', nameKey(state.name)),
       { name: state.name, created_at: serverTimestamp() });
     toast('Apuntado.');
@@ -286,7 +361,7 @@ async function join(event, hangout) {
       ? 'Ya hay alguien apuntado con ese nombre. Cambia tu nombre y prueba otra vez.'
       : 'No se pudo apuntar. Revisa tu conexión y prueba otra vez.');
   }
-  await load().catch(console.error);
+  await load().then(saveCache, console.error);
   render();
 }
 
@@ -334,6 +409,7 @@ function proposeForm(date, slotId, another) {
     send.disabled = true;
     error.hidden = true;
     try {
+      await ready.catch(() => {});
       const id = await sendProposal(data);
       store.set('bh_sent', JSON.stringify([...readSent(), { id, date, slot: slotId, title, at: Date.now() }]));
       $('sheet').close();

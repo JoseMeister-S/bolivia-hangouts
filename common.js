@@ -3,7 +3,7 @@
 // time; nothing here depends on the visitor's time zone.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
 import { getAuth, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
-import { getFirestore, connectFirestoreEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+import { getFirestore, connectFirestoreEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js';
 import { firebaseConfig } from './config.js';
 
 // Local development only: http://localhost:5500/?emulator talks to the Firebase
@@ -11,6 +11,9 @@ import { firebaseConfig } from './config.js';
 const useEmulator = ['localhost', '127.0.0.1'].includes(location.hostname)
   && new URLSearchParams(location.search).has('emulator');
 
+// Firestore Lite is used on purpose: the pages only read and write on demand,
+// and Lite does that over plain HTTPS without opening a streaming channel,
+// which made the first load several seconds slower.
 export const app = initializeApp(useEmulator ? { ...firebaseConfig, projectId: 'demo-bolivia-hangouts' } : firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);

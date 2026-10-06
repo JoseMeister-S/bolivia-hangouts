@@ -8,7 +8,7 @@ import {
 import {
   doc, collection, collectionGroup, getDoc, getDocs, setDoc, updateDoc, deleteDoc,
   writeBatch, serverTimestamp, Timestamp,
-} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js';
 import {
   auth, db, SLOTS, slotById, slotIndex, LIMITS, tripDays, formatDay, formatDayShort, el,
   clean, cleanName, nameKey, friendLink, whatsappUrl, toast, todayInBolivia, renderTimetable,

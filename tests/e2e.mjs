@@ -45,7 +45,9 @@ async function open(url, options = {}) {
 }
 const shot = (page, name, fullPage = false) => shots && page.screenshot({ path: path.join(shots, name + '.png'), fullPage });
 const cell = (page, date, index = 0) => page.locator(`#d-${date} .tt-cell`).nth(index);
-const reloaded = async (page, selector = '.tt-row[id^="d-"]') => { await page.reload(); await page.waitForSelector(selector, { state: 'attached' }); };
+// The friends' page first shows its saved copy; wait for the fresh data.
+const FRESH = '#calendar[aria-busy="false"]';
+const reloaded = async (page, selector = FRESH) => { await page.reload(); await page.waitForSelector(selector, { state: 'attached' }); };
 // Everything a friend's page holds, visible or not.
 const pageText = (page) => page.evaluate(() => document.body.textContent);
 
@@ -82,7 +84,8 @@ try {
   // ---- Friend 1 proposes
   const friendUrl = `/?emulator&c=${code}`;
   const caro = await open(friendUrl);
-  await caro.waitForSelector('.tt-row[id^="d-"]');
+  check(await caro.locator('#status .critter.on').count() === 1, 'one loader animal shows while the page loads');
+  await caro.waitForSelector(FRESH);
   check(await caro.locator('.tt-row[id^="d-"]').count() === 20, 'friend timetable has 20 days');
   check(await caro.locator('#d-2026-12-14 .tt-cell').count() === 1
     && (await cell(caro, '2026-12-14').innerText()) === 'Llegando a Cochabamba (21:55)', '14 Dec is one all-day block with its label');
@@ -102,7 +105,7 @@ try {
   check((await caro.innerText('#toast')).startsWith('¡Enviado!'), 'confirmation message shown');
 
   const luis = await open(friendUrl, { colorScheme: 'dark' });
-  await luis.waitForSelector('.tt-row[id^="d-"]');
+  await luis.waitForSelector(FRESH);
   check(await luis.locator('.tt-cell.is-plan, .tt-cell.is-wait').count() === 0, 'other friends see nothing before approval');
 
   // ---- Admin approves: private by default

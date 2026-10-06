@@ -35,6 +35,18 @@ self-hosted in `fonts/`, no request to a font service): condensed in the
 timetable cells and the title, regular width for reading. Light and dark follow
 the system setting.
 
+## Loading
+
+- The pages use Firestore Lite: plain HTTPS requests, no streaming channel.
+  With the full SDK the first load took several seconds longer.
+- The friends' page keeps the last timetable it loaded in the browser and
+  shows it at once on the next visit, then replaces it with fresh data. The
+  copy holds only what that friend was allowed to read.
+- A device that already registered the invite code skips that write.
+- While the scripts load, one of three small animated animals (a blue
+  lobster, a frog, an owl) is picked at random. They are inline SVG with CSS
+  animation and stand still when the system asks for reduced motion.
+
 ## Security model
 
 The repository is public; the data and the link are not. All enforcement is in
@@ -132,6 +144,7 @@ machine (`npm i --no-save playwright-core`):
 ```
 npm run test:e2e                        # both pages against the Firestore + Auth emulators
 node tests/smoke.mjs https://your.site  # start screens of a deployed site
+INVITE_CODE=xxx node tests/timing.mjs https://your.site   # time to timetable
 ```
 
 The end-to-end run covers admin setup, a proposal, a private approval (other

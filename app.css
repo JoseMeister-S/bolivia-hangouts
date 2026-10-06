@@ -90,6 +90,50 @@ p { margin: 0 0 .75rem; max-width: 62ch; }
 main > section, #panel > section { margin-top: 3rem; }
 #calendar { margin-top: 0; }
 
+/* ---- Loader: a lobster, a frog or an owl, picked at random ---- */
+
+.loader { display: grid; justify-items: start; gap: .25rem; margin-top: 2.5rem; color: var(--soft); }
+.critter { display: none; width: 7.5rem; height: 7.5rem; overflow: visible; }
+.critter.on { display: block; }
+.critter * { stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+/* Only the animated parts: a transform attribute (the mirrored claw) must keep the SVG origin. */
+:is(.wiggle, .sway, .snap, .hop, .shadow, .blink, .tilt, .bob) { transform-box: fill-box; }
+.k-pewter { fill: var(--pewter); }
+.k-slate { fill: var(--slate); }
+.k-bronze { fill: var(--bronze); }
+.k-mahogany { fill: var(--mahogany); }
+.k-paper { fill: var(--alabaster); }
+.k-ink { fill: var(--ink); stroke: none; }
+.k-none { fill: none; }
+
+.wiggle { transform-origin: 50% 60%; animation: wiggle 1.3s ease-in-out infinite alternate; }
+.sway { transform-origin: 50% 100%; animation: sway 1.1s ease-in-out infinite alternate; }
+.sway.alt { animation-direction: alternate-reverse; }
+.snap { transform-origin: 20% 100%; animation: snap .9s ease-in-out infinite; }
+.snap.alt { animation-delay: .45s; }
+.hop { transform-origin: 50% 100%; animation: hop 1.15s cubic-bezier(.3, 0, .4, 1) infinite; }
+.shadow { opacity: .16; transform-origin: 50% 50%; animation: shadow 1.15s cubic-bezier(.3, 0, .4, 1) infinite; }
+.blink { transform-origin: 50% 50%; animation: blink 3.2s infinite; }
+.tilt { transform-origin: 50% 85%; animation: tilt 4.2s ease-in-out infinite; }
+.bob { animation: bob 2.1s ease-in-out infinite alternate; }
+
+@keyframes wiggle { from { transform: rotate(-4deg); } to { transform: rotate(4deg); } }
+@keyframes sway { from { transform: rotate(-7deg); } to { transform: rotate(7deg); } }
+@keyframes snap { 0%, 55%, 100% { transform: rotate(0); } 75% { transform: rotate(26deg); } }
+@keyframes hop {
+  0%, 62%, 100% { transform: translateY(0) scale(1.07, .9); }
+  12% { transform: translateY(0) scale(1.12, .84); }
+  38% { transform: translateY(-20px) scale(.95, 1.08); }
+}
+@keyframes shadow { 0%, 62%, 100% { transform: scaleX(1); } 38% { transform: scaleX(.6); } }
+@keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 96.5% { transform: scaleY(.08); } }
+@keyframes tilt {
+  0%, 28%, 100% { transform: rotate(0); }
+  34%, 60% { transform: rotate(-14deg); }
+  66%, 94% { transform: rotate(12deg); }
+}
+@keyframes bob { from { transform: translateY(0); } to { transform: translateY(-2px); } }
+
 /* ---- Timetable ---- */
 
 /* One week (at most 7 days) is on screen; the other weeks sit beside it. */
