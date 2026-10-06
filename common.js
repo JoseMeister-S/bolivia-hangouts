@@ -2,13 +2,22 @@
 // small DOM/date helpers. All dates are plain 'YYYY-MM-DD' strings in Bolivia
 // time; nothing here depends on the visitor's time zone.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
-import { getAuth } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
-import { getFirestore } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+import { getAuth, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+import { getFirestore, connectFirestoreEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import { firebaseConfig } from './config.js';
 
-export const app = initializeApp(firebaseConfig);
+// Local development only: http://localhost:5500/?emulator talks to the Firebase
+// emulators (npm run test:e2e) instead of the live project.
+const useEmulator = ['localhost', '127.0.0.1'].includes(location.hostname)
+  && new URLSearchParams(location.search).has('emulator');
+
+export const app = initializeApp(useEmulator ? { ...firebaseConfig, projectId: 'demo-bolivia-hangouts' } : firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+if (useEmulator) {
+  connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+  connectFirestoreEmulator(db, '127.0.0.1', 8080);
+}
 
 // Default times are Bolivia time (America/La_Paz, UTC-4, no DST).
 export const SLOTS = [
@@ -102,4 +111,65 @@ export function toast(message) {
   node.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.remove('show'), 3500);
+}
+
+// ---- Trip helpers shared by both pages ----
+
+export const SLOT_HOURS = { manana: 2.5, almuerzo: 2.5, tarde: 3.5, noche: 3.5 };
+
+const DAY_MS = 24 * 3600 * 1000;
+export const daysBetween = (from, to) =>
+  Math.round((new Date(to + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / DAY_MS);
+
+const partsFormat = new Intl.DateTimeFormat('es-BO', { weekday: 'short', month: 'short', timeZone: 'UTC' });
+// { weekday: 'lun', day: 14, month: 'dic' }
+export function dayParts(iso) {
+  const date = new Date(iso + 'T00:00:00Z');
+  const parts = Object.fromEntries(partsFormat.formatToParts(date).map((p) => [p.type, p.value.replace('.', '')]));
+  return { weekday: parts.weekday, day: date.getUTCDate(), month: parts.month };
+}
+
+export function countdownText(start, end, today) {
+  if (today < start) {
+    const left = daysBetween(today, start);
+    return left === 1 ? 'Falta 1 día' : `Faltan ${left} días`;
+  }
+  if (today > end) return 'Hasta la próxima';
+  return `Día ${daysBetween(start, today) + 1} de ${daysBetween(start, end) + 1}`;
+}
+
+// Month-style overview: one cell per day (weeks start on Monday), each with
+// four small bars, one per slot. stateOf(date, slotId) returns the CSS state
+// of a bar; badgeOf(date) may return a number to show in the corner.
+export function renderCalendar({ days, today, stateOf, describe, onPick, badgeOf }) {
+  const lead = (new Date(days[0] + 'T00:00:00Z').getUTCDay() + 6) % 7;
+  const cells = [...Array(lead).fill(null), ...days];
+  while (cells.length % 7) cells.push(null);
+  return el('div', { class: 'cal' },
+    ['L', 'M', 'X', 'J', 'V', 'S', 'D'].map((d) => el('span', { class: 'cal-dow', 'aria-hidden': 'true' }, d)),
+    cells.map((date, index) => {
+      if (!date) return el('span', { class: 'cal-empty' });
+      const { day, month } = dayParts(date);
+      const badge = badgeOf ? badgeOf(date) : 0;
+      return el('button', {
+        type: 'button',
+        class: 'cal-day' + (date === today ? ' today' : '') + (date < today ? ' past' : ''),
+        'aria-label': formatDay(date) + (describe ? ': ' + describe(date) : ''),
+        onclick: () => onPick(date),
+      },
+        el('span', { class: 'cal-num' }, day, (day === 1 || index === lead) ? el('small', {}, month) : null),
+        el('span', { class: 'cal-bars' }, SLOTS.map((slot) => el('i', { class: 'bar ' + stateOf(date, slot.id) }))),
+        badge ? el('span', { class: 'cal-badge' }, badge) : null,
+      );
+    }),
+  );
+}
+
+export function legend(items) {
+  return el('ul', { class: 'legend' }, items.map(([state, label]) =>
+    el('li', {}, el('i', { class: 'bar ' + state }), label)));
+}
+
+export function statTile(value, label, tone = '') {
+  return el('div', { class: 'stat ' + tone }, el('strong', {}, value), el('span', {}, label));
 }

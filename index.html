@@ -5,13 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#1b2824">
   <title>Jose en Cochabamba</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <header class="hero">
-    <h1>Jose en Cochabamba</h1>
-    <p class="sub" id="trip-range">14 de diciembre – 2 de enero</p>
+    <div class="hero-inner">
+      <p class="eyebrow" id="trip-range">14 dic 2026 — 2 ene 2027</p>
+      <h1>Jose en <span>Cochabamba</span></h1>
+      <p class="countdown" id="countdown" hidden></p>
+    </div>
+    <div class="stripe" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
   </header>
 
   <main id="main">
@@ -27,12 +32,27 @@
         <p id="hello"></p>
         <button type="button" class="btn whatsapp" id="share">Compartir por WhatsApp</button>
       </div>
+
+      <div class="stats" id="stats"></div>
+
+      <section class="card" aria-label="Vista del viaje">
+        <div class="card-head">
+          <h2>El viaje de un vistazo</h2>
+          <p class="hint">Toca un día para ir a él.</p>
+        </div>
+        <div id="cal"></div>
+        <div id="legend"></div>
+      </section>
+
       <p class="notice">
-        Elige un espacio libre y propón un plan, o apúntate a uno que ya esté confirmado.
+        Elige un espacio libre y propón un plan, o apúntate a uno ya confirmado.
         Jose confirma cada propuesta antes de que aparezca aquí.
         <strong>No pongas direcciones exactas.</strong>
       </p>
+
+      <div class="filters" id="filters" role="group" aria-label="Filtrar días"></div>
       <div id="days"></div>
+      <p class="empty" id="no-days" hidden>Ningún día coincide con este filtro.</p>
     </section>
   </main>
 

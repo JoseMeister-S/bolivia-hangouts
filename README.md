@@ -20,8 +20,8 @@ are used only for display and for the `.ics` export.
 
 | Page | Who | What |
 |---|---|---|
-| `index.html?c=CODE` | Friends | See free, blocked and confirmed slots; propose a plan; join a confirmed one; share the link on WhatsApp. |
-| `admin.html` | The host | Google sign-in. Approve, reject or edit proposals (conflicts are highlighted), manage confirmed hangouts and participants, block slots, rotate the invite code, export `.ics`. |
+| `index.html?c=CODE` | Friends | A trip overview (one cell per day, one bar per slot), day cards with filters, a countdown, and counts of confirmed plans and free slots. Propose a plan on a free slot, join a confirmed one, share the link on WhatsApp. |
+| `admin.html` | The host | Google sign-in. The same overview with pending and conflict marks; tap a day to see it and act on it. Approve, reject or edit proposals, manage confirmed hangouts and participants, see who you spend the most time with, reserve time for yourself (for example the gym on weekday mornings) or block slots, rotate the invite code, export `.ics`. |
 
 ## Security model
 
@@ -36,7 +36,9 @@ Firebase web config.
   rotating the code locks out every old link at once.
 - **Pending is invisible.** Proposals go to the `proposals` collection. Friends
   can create documents there but can never read them, not even their own.
-  Friends can read only `hangouts`, and only the admin can write to it.
+  Friends can read only `hangouts` and `blocked_slots` (blocks and the host's
+  own reserved time, with the label the host chose), and only the admin can
+  write to them.
   Approving a proposal means the admin copies it into `hangouts`. There is no
   status field a client could flip.
 - **Validated writes.** A proposal must have exactly the expected fields,
@@ -96,10 +98,19 @@ approved, and a pending proposal cannot be joined. It leaves one pending
 `[TEST]` proposal for you to delete.
 
 The emulator needs Java 21 or newer with current `firebase-tools`; with Java
-11–17 use `npm run test:rules:java17`.
+11–17 use `npm run test:rules:java17` and `npm run test:e2e:java17`.
 
-`tests/smoke.mjs` is an optional headless-browser check of the friends' page
-(`npm i --no-save playwright-core`).
+Browser tests use `playwright-core` with the Edge or Chrome already on your
+machine (`npm i --no-save playwright-core`):
+
+```
+npm run test:e2e                        # both pages against the Firestore + Auth emulators
+node tests/smoke.mjs https://your.site  # start screens of a deployed site
+```
+
+The end-to-end run covers admin setup, a proposal, approval, joining, the
+people summary, reserving time, the `.ics` export and invite-code rotation. For
+local work, `http://localhost:5500/?emulator` points the pages at the emulators.
 
 ## License
 

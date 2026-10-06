@@ -8,6 +8,8 @@
     "serve": "npx --yes http-server . -p 5500 -c-1",
     "test:rules:java17": "npx --yes firebase-tools@13.35.1 emulators:exec --only firestore --project demo-bolivia-hangouts \"node tests/security.mjs\"",
     "test:rules": "firebase emulators:exec --only firestore --project demo-bolivia-hangouts \"node tests/security.mjs\"",
+    "test:e2e": "firebase emulators:exec --only firestore,auth --project demo-bolivia-hangouts \"node tests/e2e.mjs\"",
+    "test:e2e:java17": "npx --yes firebase-tools@13.35.1 emulators:exec --only firestore,auth --project demo-bolivia-hangouts \"node tests/e2e.mjs\"",
     "test:live": "node tests/security.mjs",
     "deploy:rules": "firebase deploy --only firestore:rules"
   },

@@ -6,7 +6,8 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import {
   auth, db, SLOTS, slotById, LIMITS, tripDays, formatDay, todayInBolivia, el, clean,
-  cleanName, nameKey, store, friendLink, whatsappUrl, toast,
+  cleanName, nameKey, store, friendLink, whatsappUrl, toast, renderCalendar, legend, statTile,
+  countdownText, dayParts,
 } from './common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -16,7 +17,8 @@ const state = {
   code: null,
   name: cleanName(store.get('bh_name')),
   settings: null,
-  blocked: new Map(),     // 'date_slot' -> label
+  filter: 'all',
+  blocked: new Map(),     // 'date_slot' -> { label, kind } (kind 'personal' = Jose's own time)
   hangouts: new Map(),    // 'date_slot' -> [hangout]
   hangoutIds: new Set(),
   participants: new Map(), // hangout id -> [name]
@@ -64,7 +66,7 @@ async function load() {
     getDocs(collectionGroup(db, 'participants')),
   ]);
   state.settings = settings.data();
-  state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data().label]));
+  state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
   state.hangouts = new Map();
   state.hangoutIds = new Set();
   for (const d of hangouts.docs) {
@@ -94,42 +96,138 @@ function myPending() {
   return list;
 }
 
+const FILTERS = [
+  ['all', 'Todos los días'],
+  ['free', 'Con espacio libre'],
+  ['plans', 'Con planes'],
+  ['mine', 'Mis planes'],
+];
+
+const isMine = (hangout) => state.name
+  && (state.participants.get(hangout.id) || []).some((p) => nameKey(p.name) === nameKey(state.name));
+
+// Everything the views need to know about one slot.
+function slotInfo(date, slotId, pending) {
+  const key = `${date}_${slotId}`;
+  const block = state.blocked.get(key) || null;
+  const hangouts = state.hangouts.get(key) || [];
+  const mine = pending.filter((p) => p.date === date && p.slot === slotId);
+  // A confirmed plan wins over a block in the overview: it is what people look for.
+  const status = hangouts.length ? (hangouts.some(isMine) ? 'hangout mine' : 'hangout')
+    : block ? (block.kind === 'personal' ? 'personal' : 'blocked')
+    : mine.length ? 'pending' : 'free';
+  return { block, hangouts, mine, status };
+}
+
 function render() {
   const { trip_start: start, trip_end: end } = state.settings;
-  $('trip-range').textContent = `${formatDay(start).replace(/^\S+\s/, '')} – ${formatDay(end).replace(/^\S+\s/, '')}`;
+  const today = todayInBolivia();
+  const pending = myPending();
+  const days = tripDays(start, end);
+  const info = new Map(days.map((date) => [date, SLOTS.map((slot) => slotInfo(date, slot.id, pending))]));
+
+  const countdown = $('countdown');
+  countdown.textContent = countdownText(start, end, today);
+  countdown.hidden = false;
 
   $('hello').replaceChildren(
     state.name ? `Hola, ${state.name}. ` : '',
     el('button', { type: 'button', class: 'link', onclick: askName }, state.name ? 'Cambiar nombre' : 'Decir mi nombre'),
   );
 
-  const today = todayInBolivia();
-  const pending = myPending();
-  $('days').replaceChildren(...tripDays(start, end).map((date) => {
+  // Numbers at the top: only days that are still ahead count as free.
+  const upcoming = days.filter((date) => date >= today);
+  const free = upcoming.reduce((n, date) => n + info.get(date).filter((s) => s.status === 'free').length, 0);
+  const myCount = [...state.hangouts.values()].flat().filter(isMine).length;
+  $('stats').replaceChildren(
+    statTile(state.hangoutIds.size, state.hangoutIds.size === 1 ? 'plan confirmado' : 'planes confirmados', 'tone-hangout'),
+    statTile(free, free === 1 ? 'espacio libre' : 'espacios libres', 'tone-free'),
+    statTile(myCount, myCount === 1 ? 'plan contigo' : 'planes contigo', 'tone-mine'),
+  );
+
+  const describe = (date) => {
+    const slots = info.get(date);
+    const count = (status) => slots.filter((s) => s.status.startsWith(status)).length;
+    return `${count('free')} libres, ${count('hangout')} con plan`;
+  };
+  $('cal').replaceChildren(renderCalendar({
+    days, today, describe,
+    stateOf: (date, slotId) => info.get(date)[SLOTS.findIndex((s) => s.id === slotId)].status,
+    onPick: goToDay,
+  }));
+  $('legend').replaceChildren(legend([
+    ['free', 'Libre'], ['hangout', 'Plan confirmado'], ['pending', 'Tu propuesta'],
+    ['personal', 'Jose ocupado'], ['blocked', 'No disponible'],
+  ]));
+
+  $('filters').replaceChildren(...FILTERS.map(([id, label]) => el('button', {
+    type: 'button',
+    class: 'chip-filter' + (state.filter === id ? ' on' : ''),
+    'aria-pressed': String(state.filter === id),
+    onclick: () => { state.filter = id; render(); },
+  }, label)));
+
+  const matches = (date) => {
+    const slots = info.get(date);
+    if (state.filter === 'free') return date >= today && slots.some((s) => s.status === 'free');
+    if (state.filter === 'plans') return slots.some((s) => s.hangouts.length);
+    if (state.filter === 'mine') return slots.some((s) => s.mine.length || s.hangouts.some(isMine));
+    return true;
+  };
+  const shown = days.filter(matches);
+  $('no-days').hidden = shown.length > 0;
+  $('days').replaceChildren(...shown.map((date) => {
     const past = date < today;
-    return el('article', { class: 'card day' + (past ? ' past' : '') },
-      el('h2', {}, formatDay(date)),
-      SLOTS.map((slot) => renderSlot(date, slot, past, pending)),
+    const { weekday, day, month } = dayParts(date);
+    const slots = info.get(date);
+    const freeHere = past ? 0 : slots.filter((s) => s.status === 'free').length;
+    const plansHere = slots.reduce((n, s) => n + s.hangouts.length, 0);
+    return el('article', { class: 'card day' + (past ? ' past' : '') + (date === today ? ' is-today' : ''), id: 'day-' + date },
+      el('header', { class: 'day-head' },
+        el('div', { class: 'date-block', 'aria-hidden': 'true' },
+          el('span', { class: 'dow' }, weekday), el('strong', {}, day), el('span', { class: 'mon' }, month)),
+        el('div', {},
+          el('h2', {}, formatDay(date)),
+          el('p', { class: 'day-sum' },
+            date === today ? el('span', { class: 'tag today' }, 'Hoy') : null,
+            plansHere ? el('span', { class: 'tag plans' }, plansHere === 1 ? '1 plan' : `${plansHere} planes`) : null,
+            freeHere ? el('span', { class: 'tag free' }, freeHere === 1 ? '1 libre' : `${freeHere} libres`) : null,
+            !plansHere && !freeHere ? el('span', { class: 'tag' }, past ? 'Ya pasó' : 'Sin espacio') : null,
+          )),
+      ),
+      SLOTS.map((slot, i) => renderSlot(date, slot, past, slots[i])),
     );
   }));
 }
 
-function renderSlot(date, slot, past, pending) {
-  const key = `${date}_${slot.id}`;
-  const blockedLabel = state.blocked.get(key);
-  const hangouts = state.hangouts.get(key) || [];
-  const mine = pending.filter((p) => p.date === date && p.slot === slot.id);
+function goToDay(date) {
+  if (!document.getElementById('day-' + date)) {
+    state.filter = 'all';
+    render();
+  }
+  const card = document.getElementById('day-' + date);
+  if (!card) return;
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  card.scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' });
+  card.classList.remove('flash');
+  void card.offsetWidth; // restart the animation
+  card.classList.add('flash');
+}
+
+function renderSlot(date, slot, past, { block, hangouts, mine, status }) {
   const body = el('div', { class: 'slot-body' });
 
-  if (blockedLabel != null) {
-    body.append(el('p', { class: 'blocked' }, blockedLabel || 'No disponible'));
+  if (block) {
+    body.append(block.kind === 'personal'
+      ? el('p', { class: 'personal' }, el('span', { class: 'who' }, 'Jose'), block.label || 'Ocupado')
+      : el('p', { class: 'blocked' }, block.label || 'No disponible'));
   }
   for (const hangout of hangouts) body.append(renderHangout(hangout, past));
   for (const p of mine) {
     body.append(el('p', { class: 'pending' }, `Tu propuesta «${p.title}» espera la confirmación de Jose.`));
   }
-  if (blockedLabel == null && !past) {
-    const free = hangouts.length === 0 && mine.length === 0;
+  if (!block && !past) {
+    const free = status === 'free';
     body.append(el('div', { class: 'slot-actions' },
       free ? el('span', { class: 'free' }, 'Libre') : null,
       el('button', { type: 'button', class: 'btn small' + (free ? ' primary' : ''), onclick: () => openPropose(date, slot) },
@@ -137,7 +235,7 @@ function renderSlot(date, slot, past, pending) {
     ));
   }
 
-  return el('section', { class: 'slot' + (blockedLabel != null ? ' is-blocked' : '') },
+  return el('section', { class: 'slot is-' + status.split(' ')[0] },
     el('div', { class: 'slot-head' },
       el('span', { class: 'slot-name' }, slot.label),
       el('span', { class: 'slot-time' }, `${slot.start}–${slot.end}`),
@@ -149,7 +247,7 @@ function renderSlot(date, slot, past, pending) {
 function renderHangout(hangout, past) {
   const people = state.participants.get(hangout.id) || [];
   const joined = state.name && people.some((p) => nameKey(p.name) === nameKey(state.name));
-  return el('div', { class: 'hangout' },
+  return el('div', { class: 'hangout' + (joined ? ' mine' : '') },
     el('p', { class: 'hangout-title' }, hangout.title),
     hangout.place ? el('p', { class: 'hangout-place' }, hangout.place) : null,
     el('p', { class: 'hangout-people' },

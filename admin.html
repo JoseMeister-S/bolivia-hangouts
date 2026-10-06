@@ -5,13 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#1b2824">
   <title>Admin · Jose en Cochabamba</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body class="admin">
   <header class="hero">
-    <h1>Panel de Jose</h1>
-    <p class="sub" id="who"></p>
+    <div class="hero-inner">
+      <p class="eyebrow" id="who">Panel privado</p>
+      <h1>Panel de <span>Jose</span></h1>
+      <p class="countdown" id="countdown" hidden></p>
+    </div>
+    <div class="stripe" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
   </header>
 
   <main id="main">
@@ -42,6 +47,49 @@
     </section>
 
     <div id="panel" hidden>
+      <div class="stats four" id="stats"></div>
+
+      <section class="card" aria-label="Vista del viaje">
+        <div class="card-head">
+          <h2>El viaje de un vistazo</h2>
+          <p class="hint">Toca un día para verlo y reservar tiempo.</p>
+        </div>
+        <div id="cal"></div>
+        <div id="legend"></div>
+      </section>
+
+      <section>
+        <h2 class="section-title">Pendientes <span class="count" id="pending-count"></span></h2>
+        <div id="pending"></div>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2 class="section-title">Confirmados <span class="count" id="approved-count"></span></h2>
+          <button type="button" class="btn small" id="export">Exportar .ics</button>
+        </div>
+        <div id="approved"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Con quién paso el tiempo</h2>
+          <p class="hint">Según quién está apuntado en los planes confirmados.</p>
+        </div>
+        <div id="people"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head row">
+          <div>
+            <h2>Mi tiempo y bloqueos</h2>
+            <p class="hint">Gimnasio, trabajo, familia. Nadie puede proponer en esos espacios.</p>
+          </div>
+          <button type="button" class="btn primary small" id="reserve-open">Reservar tiempo</button>
+        </div>
+        <div id="blocked"></div>
+      </section>
+
       <section class="card">
         <h2>Enlace para amigos</h2>
         <p><code id="link" class="block"></code></p>
@@ -53,40 +101,10 @@
       </section>
 
       <section>
-        <h2 class="section-title">Pendientes <span class="count" id="pending-count"></span></h2>
-        <div id="pending"></div>
-      </section>
-
-      <section>
-        <h2 class="section-title">Confirmados <span class="count" id="approved-count"></span></h2>
-        <div class="actions">
-          <button type="button" class="btn" id="export">Exportar .ics</button>
-        </div>
-        <div id="approved"></div>
-      </section>
-
-      <section>
         <details>
           <summary class="section-title">Rechazados <span class="count" id="rejected-count"></span></summary>
           <div id="rejected"></div>
         </details>
-      </section>
-
-      <section class="card">
-        <h2>Bloqueos</h2>
-        <form id="block-form" class="inline-form">
-          <label>Día <select name="date" required></select></label>
-          <label>Momento
-            <select name="slot" required>
-              <option value="all">Todo el día</option>
-            </select>
-          </label>
-          <label class="grow">Texto que ven los amigos
-            <input name="label" maxlength="80" required placeholder="Ej. Día en familia">
-          </label>
-          <button type="submit" class="btn primary">Bloquear</button>
-        </form>
-        <ul id="blocked" class="plain"></ul>
       </section>
 
       <p class="center"><button type="button" class="btn" id="logout">Salir</button></p>
@@ -105,6 +123,46 @@
       <div class="actions">
         <button type="button" class="btn" id="edit-cancel">Cancelar</button>
         <button type="submit" class="btn primary">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="day-dialog">
+    <h2 class="when" id="day-title"></h2>
+    <div id="day-body"></div>
+    <div class="actions">
+      <button type="button" class="btn" id="day-close">Cerrar</button>
+    </div>
+  </dialog>
+
+  <dialog id="reserve-dialog">
+    <form method="dialog" id="reserve-form">
+      <h2>Reservar tiempo</h2>
+      <label>¿Para qué?
+        <input name="label" maxlength="80" required placeholder="Ej. Gimnasio">
+      </label>
+      <div class="presets" id="reserve-presets"></div>
+      <fieldset class="radios">
+        <legend>Cómo lo ven tus amigos</legend>
+        <label><input type="radio" name="kind" value="personal" checked> Tiempo mío <span class="hint">(«Jose · Gimnasio»)</span></label>
+        <label><input type="radio" name="kind" value="block"> No disponible <span class="hint">(solo el texto)</span></label>
+      </fieldset>
+      <label>Momento
+        <select name="slot" required></select>
+      </label>
+      <fieldset>
+        <legend>Días</legend>
+        <div class="presets">
+          <button type="button" class="chip-filter" data-pick="all">Todos</button>
+          <button type="button" class="chip-filter" data-pick="weekdays">Lun–Vie</button>
+          <button type="button" class="chip-filter" data-pick="none">Ninguno</button>
+        </div>
+        <div class="day-picks" id="reserve-days"></div>
+      </fieldset>
+      <p class="error" id="reserve-error" hidden></p>
+      <div class="actions">
+        <button type="button" class="btn" id="reserve-cancel">Cancelar</button>
+        <button type="submit" class="btn primary">Reservar</button>
       </div>
     </form>
   </dialog>

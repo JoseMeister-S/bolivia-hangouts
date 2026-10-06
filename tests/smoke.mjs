@@ -3,6 +3,7 @@
 //
 //   node tests/smoke.mjs http://localhost:5500            -> gate + login screens
 //   INVITE_CODE=xxx node tests/smoke.mjs <base-url>       -> also the friend flow
+//   READ_ONLY=1 with a code                               -> look, but send nothing
 //
 // With a code it sends one proposal titled "[TEST] smoke". Delete it in admin.html.
 import { chromium } from 'playwright-core';
@@ -51,22 +52,23 @@ if (code) {
     await page.fill('#name-form input[name=name]', 'Prueba');
     await page.click('#name-form button[type=submit]');
     check(await page.locator('.day').count() === 20, `${colorScheme}: 20 day cards`);
-    check(await page.locator('.blocked').first().innerText() === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
+    check(await page.locator('.cal-day').count() === 20, `${colorScheme}: calendar overview has 20 days`);
+    check(await page.locator('p.blocked').first().innerText() === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
     check(await page.locator('.day').first().locator('button').count() === 0, `${colorScheme}: blocked day has no "Proponer" button`);
     if (shots) await page.screenshot({ path: `${shots}/friends-${colorScheme}.png`, fullPage: false });
 
-    if (colorScheme === 'light') {
+    if (colorScheme === 'light' && !process.env.READ_ONLY) {
       await page.locator('.day').nth(4).getByRole('button', { name: 'Proponer plan' }).first().click();
       await page.fill('#propose-form input[name=title]', '[TEST] smoke');
       await page.fill('#propose-form input[name=place]', 'Café de prueba');
       if (shots) await page.screenshot({ path: `${shots}/propose.png` });
       await page.click('#propose-send');
-      await page.waitForSelector('.pending', { timeout: 20000 });
+      await page.waitForSelector('p.pending', { timeout: 20000 });
       check((await page.locator('#toast').innerText()).startsWith('¡Enviado!'), 'proposal sent, confirmation shown');
-      check(await page.locator('.hangout', { hasText: '[TEST] smoke' }).count() === 0, 'pending proposal is not shown as a hangout');
+      check(await page.locator('div.hangout', { hasText: '[TEST] smoke' }).count() === 0, 'pending proposal is not shown as a hangout');
       await page.reload();
       await page.waitForSelector('.day');
-      check(await page.locator('.hangout', { hasText: '[TEST] smoke' }).count() === 0, 'still not visible after reload');
+      check(await page.locator('div.hangout', { hasText: '[TEST] smoke' }).count() === 0, 'still not visible after reload');
       check(await page.locator('#name-dialog[open]').count() === 0, 'name is remembered');
     }
     check(errors.length === 0, `${colorScheme}: no script errors ` + errors.join(' | '));

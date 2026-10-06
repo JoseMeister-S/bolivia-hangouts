@@ -11,7 +11,8 @@ import {
 } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
 import {
   auth, db, SLOTS, slotById, slotIndex, LIMITS, tripDays, formatDay, formatDayShort, el,
-  clean, cleanName, nameKey, friendLink, whatsappUrl, toast,
+  clean, cleanName, nameKey, friendLink, whatsappUrl, toast, todayInBolivia, renderCalendar,
+  legend, statTile, countdownText, dayParts, SLOT_HOURS,
 } from './common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -69,10 +70,10 @@ async function act(fn, done) {
 onAuthStateChanged(auth, async (user) => {
   // The friends' page signs in anonymously on this same origin; that is not a login.
   if (!user || user.isAnonymous) {
-    $('who').textContent = '';
+    $('who').textContent = 'Panel privado';
     return show('login');
   }
-  $('who').textContent = user.email || '';
+  $('who').textContent = user.email || 'Panel privado';
   const admin = await getDoc(doc(db, 'admins', user.uid)).then((snap) => snap.exists(), () => false);
   if (!admin) {
     $('uid').textContent = user.uid;
@@ -152,12 +153,54 @@ $('setup-btn').addEventListener('click', () => act(async () => {
 
 // ---- Render ----
 
+const blockAt = (date, slotId) => state.blocked.find((b) => b.id === `${date}_${slotId}`) || null;
+const hangoutsAt = (date, slotId) => state.hangouts.filter((h) => h.date === date && h.slot === slotId);
+const pendingAt = (date, slotId) =>
+  state.proposals.filter((p) => p.status === 'pending' && p.date === date && p.slot === slotId);
+
+function slotStatus(date, slotId) {
+  const block = blockAt(date, slotId);
+  const hangouts = hangoutsAt(date, slotId);
+  if (hangouts.length > 1 || (hangouts.length && block)) return 'hangout conflict';
+  if (block) return block.kind === 'personal' ? 'personal' : 'blocked';
+  if (hangouts.length) return 'hangout';
+  return pendingAt(date, slotId).length ? 'pending' : 'free';
+}
+
 function render() {
-  const link = friendLink(state.settings.invite_code);
-  $('link').textContent = link;
+  const { trip_start: start, trip_end: end, invite_code: code } = state.settings;
+  const today = todayInBolivia();
+  const days = tripDays(start, end);
+
+  $('countdown').textContent = countdownText(start, end, today);
+  $('countdown').hidden = false;
+  $('link').textContent = friendLink(code);
 
   const pending = state.proposals.filter((p) => p.status === 'pending');
   const rejected = state.proposals.filter((p) => p.status !== 'pending');
+  const people = peopleSummary();
+  const free = days.filter((d) => d >= today)
+    .reduce((n, d) => n + SLOTS.filter((s) => slotStatus(d, s.id) === 'free').length, 0);
+
+  $('stats').replaceChildren(
+    statTile(pending.length, pending.length === 1 ? 'pendiente' : 'pendientes', 'tone-pending'),
+    statTile(state.hangouts.length, state.hangouts.length === 1 ? 'confirmado' : 'confirmados', 'tone-hangout'),
+    statTile(free, free === 1 ? 'espacio libre' : 'espacios libres', 'tone-free'),
+    statTile(people.length, people.length === 1 ? 'persona' : 'personas', 'tone-mine'),
+  );
+
+  $('cal').replaceChildren(renderCalendar({
+    days, today,
+    stateOf: slotStatus,
+    describe: (date) => `${SLOTS.filter((s) => slotStatus(date, s.id) === 'free').length} libres`,
+    badgeOf: (date) => pending.filter((p) => p.date === date).length,
+    onPick: openDay,
+  }));
+  $('legend').replaceChildren(legend([
+    ['free', 'Libre'], ['pending', 'Pendiente'], ['hangout', 'Confirmado'], ['hangout conflict', 'Choque'],
+    ['personal', 'Mi tiempo'], ['blocked', 'Bloqueado'],
+  ]));
+
   $('pending-count').textContent = pending.length;
   $('rejected-count').textContent = rejected.length;
   $('approved-count').textContent = state.hangouts.length;
@@ -168,18 +211,14 @@ function render() {
     : [el('p', { class: 'empty' }, 'Nada rechazado.')]));
   $('approved').replaceChildren(...(state.hangouts.length ? state.hangouts.map(renderApproved)
     : [el('p', { class: 'empty' }, 'Todavía no hay planes confirmados.')]));
-  $('blocked').replaceChildren(...state.blocked.map(renderBlocked));
+  $('people').replaceChildren(renderPeople(people));
+  $('blocked').replaceChildren(renderBlockGroups());
 
-  const days = tripDays(state.settings.trip_start, state.settings.trip_end);
-  for (const select of [$('block-form').elements.date, $('edit-form').elements.date]) {
-    const current = select.value;
-    select.replaceChildren(...days.map((d) => el('option', { value: d }, formatDayShort(d))));
-    if (current) select.value = current;
-  }
-  const slotOptions = () => SLOTS.map((s) => el('option', { value: s.id }, s.label));
-  $('edit-form').elements.slot.replaceChildren(...slotOptions());
-  const blockSlot = $('block-form').elements.slot;
-  if (blockSlot.options.length === 1) blockSlot.append(...slotOptions());
+  const dateSelect = $('edit-form').elements.date;
+  dateSelect.replaceChildren(...days.map((d) => el('option', { value: d }, formatDayShort(d))));
+  $('edit-form').elements.slot.replaceChildren(...SLOTS.map((s) => el('option', { value: s.id }, s.label)));
+
+  if ($('day-dialog').open && openDate) renderDay(openDate);
 }
 
 function details(item) {
@@ -254,12 +293,204 @@ function renderApproved(h) {
   );
 }
 
-function renderBlocked(b) {
-  return el('li', {},
-    el('span', {}, `${formatDayShort(b.date)} · ${slotById[b.slot]?.label ?? b.slot} — ${b.label}`),
-    el('button', { type: 'button', class: 'btn small danger', onclick: () => act(() => deleteDoc(doc(db, 'blocked_slots', b.id))) }, 'Quitar'),
-  );
+// ---- Who I spend time with ----
+
+// One entry per person, from the participants of approved hangouts.
+function peopleSummary() {
+  const people = new Map();
+  for (const h of state.hangouts) {
+    for (const person of state.participants.get(h.id) || []) {
+      const entry = people.get(person.key) || { name: person.name, hangouts: [], hours: 0 };
+      entry.hangouts.push(h);
+      entry.hours += SLOT_HOURS[h.slot] || 0;
+      people.set(person.key, entry);
+    }
+  }
+  return [...people.values()].sort((a, b) =>
+    b.hangouts.length - a.hangouts.length || a.name.localeCompare(b.name, 'es'));
 }
+
+function renderPeople(people) {
+  if (!people.length) return el('p', { class: 'empty' }, 'Cuando confirmes planes, aquí ves con quién pasas más tiempo.');
+  const most = people[0].hangouts.length;
+  return el('ol', { class: 'people' }, people.map((person) => {
+    const times = person.hangouts.length;
+    return el('li', {},
+      el('details', {},
+        el('summary', {},
+          el('span', { class: 'person-name' }, person.name),
+          el('span', { class: 'person-count' }, `${times === 1 ? '1 vez' : times + ' veces'} · ≈ ${String(person.hours).replace('.', ',')} h`),
+          el('span', { class: 'meter', 'aria-hidden': 'true' }, el('i', { style: `width:${Math.round((times / most) * 100)}%` })),
+        ),
+        el('ul', { class: 'person-list' }, person.hangouts.map((h) =>
+          el('li', {}, `${formatDayShort(h.date)} · ${slotById[h.slot]?.label ?? h.slot} — ${h.title}`))),
+      ),
+    );
+  }));
+}
+
+// ---- My time and blocks ----
+
+// Same label and kind on many slots (gym every morning, a whole family day) shows as one row.
+function renderBlockGroups() {
+  if (!state.blocked.length) return el('p', { class: 'empty' }, 'Sin reservas ni bloqueos.');
+  const groups = new Map();
+  for (const b of state.blocked) {
+    const key = `${b.kind === 'personal' ? 'personal' : 'block'}|${b.label}`;
+    groups.set(key, [...(groups.get(key) || []), b]);
+  }
+  const removeAll = (items) => act(async () => {
+    const batch = writeBatch(db);
+    for (const b of items) batch.delete(doc(db, 'blocked_slots', b.id));
+    await batch.commit();
+  }, 'Quitado');
+  return el('ul', { class: 'plain groups' }, [...groups.values()].map((items) => {
+    const first = items[0];
+    const personal = first.kind === 'personal';
+    const slotName = (b) => slotById[b.slot]?.label ?? b.slot;
+    const oneSlot = items.every((b) => b.slot === first.slot);
+    const days = new Set(items.map((b) => b.date)).size;
+    const where = items.length === 1 ? `${slotName(first)} · ${formatDayShort(first.date)}`
+      : oneSlot ? `${slotName(first)} · ${days} días`
+      : days === 1 ? `${formatDayShort(first.date)} · ${items.length} espacios`
+      : `${items.length} espacios en ${days} días`;
+    return el('li', {},
+      el('details', {},
+        el('summary', {},
+          el('span', { class: 'tag ' + (personal ? 'personal' : 'blocked') }, personal ? 'Mi tiempo' : 'Bloqueo'),
+          el('strong', {}, first.label),
+          el('span', { class: 'meta' }, ' · ' + where),
+        ),
+        el('ul', { class: 'plain' }, items.map((b) => el('li', {},
+          el('span', {}, `${formatDayShort(b.date)} · ${slotName(b)}`),
+          el('button', { type: 'button', class: 'btn small danger', onclick: () => act(() => deleteDoc(doc(db, 'blocked_slots', b.id))) }, 'Quitar'),
+        ))),
+      ),
+      items.length > 1 ? el('button', {
+        type: 'button', class: 'btn small danger',
+        onclick: () => confirm(`¿Quitar «${first.label}» de los ${items.length} espacios?`) && removeAll(items),
+      }, 'Quitar todo') : null,
+    );
+  }));
+}
+
+// ---- Day view (opened from the calendar) ----
+
+let openDate = null;
+
+function openDay(date) {
+  openDate = date;
+  renderDay(date);
+  if (!$('day-dialog').open) $('day-dialog').showModal();
+}
+
+function renderDay(date) {
+  $('day-title').textContent = formatDay(date);
+  $('day-body').replaceChildren(...SLOTS.map((slot) => {
+    const block = blockAt(date, slot.id);
+    const hangouts = hangoutsAt(date, slot.id);
+    const pending = pendingAt(date, slot.id);
+    const body = el('div', { class: 'slot-body' });
+    if (block) {
+      body.append(el('div', { class: 'row-line' },
+        el('p', { class: block.kind === 'personal' ? 'personal' : 'blocked' },
+          block.kind === 'personal' ? el('span', { class: 'who' }, 'Jose') : null, block.label),
+        el('button', { type: 'button', class: 'btn small danger', onclick: () => act(() => deleteDoc(doc(db, 'blocked_slots', block.id))) }, 'Quitar'),
+      ));
+    }
+    for (const h of hangouts) {
+      const names = (state.participants.get(h.id) || []).map((p) => p.name);
+      body.append(el('div', { class: 'hangout' },
+        el('p', { class: 'hangout-title' }, h.title),
+        h.place ? el('p', { class: 'hangout-place' }, h.place) : null,
+        el('p', { class: 'hangout-people' }, names.length ? 'Vienen: ' + names.join(', ') : 'Nadie apuntado.')));
+    }
+    for (const p of pending) {
+      body.append(el('div', { class: 'row-line' },
+        el('p', { class: 'pending' }, `${p.title} — ${p.proposer_name}`),
+        el('button', { type: 'button', class: 'btn small primary', onclick: () => approve(p) }, 'Aprobar')));
+    }
+    if (!block) {
+      body.append(el('div', { class: 'slot-actions' },
+        !hangouts.length && !pending.length ? el('span', { class: 'free' }, 'Libre') : null,
+        el('button', { type: 'button', class: 'btn small', onclick: () => openReserve({ dates: [date], slot: slot.id }) }, 'Reservar para mí')));
+    }
+    return el('section', { class: 'slot is-' + slotStatus(date, slot.id).split(' ')[0] },
+      el('div', { class: 'slot-head' },
+        el('span', { class: 'slot-name' }, slot.label),
+        el('span', { class: 'slot-time' }, `${slot.start}–${slot.end}`)),
+      body);
+  }));
+}
+
+$('day-close').addEventListener('click', () => $('day-dialog').close());
+
+// ---- Reserve time for myself / block slots ----
+
+const PRESETS = ['Gimnasio', 'Trabajo', 'Familia', 'Descanso'];
+
+function openReserve({ dates = [], slot = 'manana' } = {}) {
+  const form = $('reserve-form');
+  form.reset();
+  $('reserve-error').hidden = true;
+  $('reserve-presets').replaceChildren(...PRESETS.map((label) =>
+    el('button', { type: 'button', class: 'chip-filter', onclick: () => { form.elements.label.value = label; } }, label)));
+  form.elements.slot.replaceChildren(
+    ...SLOTS.map((s) => el('option', { value: s.id }, `${s.label} (${s.start}–${s.end})`)),
+    el('option', { value: 'all' }, 'Todo el día'));
+  form.elements.slot.value = slot;
+  const today = todayInBolivia();
+  $('reserve-days').replaceChildren(...tripDays(state.settings.trip_start, state.settings.trip_end).map((date) => {
+    const { weekday, day } = dayParts(date);
+    return el('label', { class: 'day-pick' + (date < today ? ' past' : '') },
+      el('input', { type: 'checkbox', name: 'day', value: date, checked: dates.includes(date) }),
+      el('span', {}, el('small', {}, weekday), day));
+  }));
+  if ($('day-dialog').open) $('day-dialog').close();
+  $('reserve-dialog').showModal();
+}
+
+$('reserve-open').addEventListener('click', () => openReserve());
+$('reserve-cancel').addEventListener('click', () => $('reserve-dialog').close());
+
+// Quick day selection: all, Monday to Friday, none.
+for (const button of document.querySelectorAll('#reserve-form [data-pick]')) {
+  button.addEventListener('click', () => {
+    for (const box of $('reserve-form').querySelectorAll('input[name=day]')) {
+      const weekday = new Date(box.value + 'T00:00:00Z').getUTCDay();
+      box.checked = button.dataset.pick === 'all' || (button.dataset.pick === 'weekdays' && weekday >= 1 && weekday <= 5);
+    }
+  });
+}
+
+$('reserve-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const form = $('reserve-form');
+  const label = clean(form.elements.label.value, 80);
+  const kind = form.elements.kind.value;
+  const slots = form.elements.slot.value === 'all' ? ALL : [form.elements.slot.value];
+  const dates = [...form.querySelectorAll('input[name=day]:checked')].map((box) => box.value);
+  if (!label || !dates.length) {
+    $('reserve-error').textContent = 'Escribe para qué es y elige al menos un día.';
+    $('reserve-error').hidden = false;
+    return;
+  }
+  // Slots that already have a block keep it; slots with plans are still
+  // reserved, and show up as a conflict so I can decide.
+  const targets = dates.flatMap((date) => slots.map((slot) => ({ date, slot })));
+  const fresh = targets.filter((t) => !blockAt(t.date, t.slot));
+  const skipped = targets.length - fresh.length;
+  const busy = fresh.filter((t) => hangoutsAt(t.date, t.slot).length).length;
+  $('reserve-dialog').close();
+  if (!fresh.length) return toast('Esos espacios ya estaban reservados.');
+  act(async () => {
+    const batch = writeBatch(db);
+    for (const { date, slot } of fresh) {
+      batch.set(doc(db, 'blocked_slots', `${date}_${slot}`), { date, slot, label, kind });
+    }
+    await batch.commit();
+  }, `Reservado: ${fresh.length}${skipped ? ` · ${skipped} ya ocupados` : ''}${busy ? ` · ojo: ${busy} con planes` : ''}`);
+});
 
 // ---- Actions ----
 
@@ -325,21 +556,6 @@ $('edit-form').addEventListener('submit', (event) => {
   const { collectionName, id } = editing;
   $('edit-dialog').close();
   act(() => updateDoc(doc(db, collectionName, id), data), 'Guardado');
-});
-
-$('block-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  const fields = $('block-form').elements;
-  const date = fields.date.value;
-  const label = clean(fields.label.value, 80);
-  const slots = fields.slot.value === 'all' ? ALL : [fields.slot.value];
-  if (!date || !label) return;
-  act(async () => {
-    const batch = writeBatch(db);
-    for (const slot of slots) batch.set(doc(db, 'blocked_slots', `${date}_${slot}`), { date, slot, label });
-    await batch.commit();
-    fields.label.value = '';
-  }, 'Bloqueado');
 });
 
 $('copy-link').addEventListener('click', () => copy($('link').textContent));
@@ -418,12 +634,25 @@ function buildIcs(hangouts) {
       'END:VEVENT',
     );
   }
+  for (const b of state.blocked.filter((b) => b.kind === 'personal')) {
+    const slot = slotById[b.slot];
+    if (!slot) continue;
+    lines.push(
+      'BEGIN:VEVENT',
+      `UID:${b.id}@bolivia-hangouts`,
+      `DTSTAMP:${stamp}`,
+      `DTSTART;TZID=America/La_Paz:${local(b.date, slot.start)}`,
+      `DTEND;TZID=America/La_Paz:${local(b.date, slot.end)}`,
+      `SUMMARY:${escape(b.label)}`,
+      'END:VEVENT',
+    );
+  }
   lines.push('END:VCALENDAR');
   return lines.filter(Boolean).map(fold).join('\r\n') + '\r\n';
 }
 
 $('export').addEventListener('click', () => {
-  if (!state.hangouts.length) return toast('No hay planes confirmados.');
+  if (!state.hangouts.length && !state.blocked.some((b) => b.kind === 'personal')) return toast('No hay nada que exportar.');
   const blob = new Blob([buildIcs(state.hangouts)], { type: 'text/calendar;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = el('a', { href: url, download: 'cochabamba.ics' });
