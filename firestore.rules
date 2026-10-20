@@ -13,6 +13,12 @@ rules_version = '2';
 //   it. The real labels live in `reservations`, which is admin-only. A
 //   hangout's note to the host lives in `hangout_private`, also admin-only,
 //   because a friend who may read a hangout reads all of its fields.
+// - A plan can have a limit (`capacity`, the whole gathering, host included).
+//   Joining bumps `going` in the same batch as the participant and a
+//   `joined/{uid}` document for the joining device. A full plan is readable
+//   only by the devices that joined it; everyone else sees "Ocupado".
+// - Where a plan happens (`hangout_places`) is readable only by the admin and
+//   the devices that joined it.
 // - `receipts/{proposalId}` tells a proposer what happened to their own
 //   proposal (and its date, slot and title, which the admin may have edited).
 //   It can be fetched only by id, and only the proposer's device knows that
@@ -42,6 +48,40 @@ service cloud.firestore {
     // Trimmed string with a length between min and max.
     function text(s, min, max) {
       return s is string && s.size() >= min && s.size() <= max && s == s.trim();
+    }
+
+    function hangoutPath(id) {
+      return /databases/$(database)/documents/hangouts/$(id);
+    }
+
+    function joinedPath(id, uid) {
+      return /databases/$(database)/documents/hangouts/$(id)/joined/$(uid);
+    }
+
+    // This device joined the hangout.
+    function hasJoined(id) {
+      return request.auth != null && exists(joinedPath(id, request.auth.uid));
+    }
+
+    // A friend sees an open hangout while it has room, or once they are in it.
+    function canSee(id, hangout) {
+      return isMember() && hangout.open == true && (hangout.full == false || hasJoined(id));
+    }
+
+    // The same batch adds exactly one person to the hangout.
+    function goingBumped(id) {
+      return getAfter(hangoutPath(id)).data.going == get(hangoutPath(id)).data.going + 1;
+    }
+
+    // Optional proposal fields: a limit, and a place (a web link and a pin).
+    function validExtras(data) {
+      return (!('capacity' in data) || data.capacity == null
+               || (data.capacity is int && data.capacity >= 2 && data.capacity <= 50))
+        && (!('uid' in data) || data.uid == request.auth.uid)
+        && (!('map_url' in data) || (data.map_url is string && data.map_url.size() <= 500
+               && (data.map_url == '' || data.map_url.matches('https?://[^ ]+'))))
+        && (!('lat' in data) || data.lat == null || (data.lat is number && data.lat >= -90 && data.lat <= 90))
+        && (!('lng' in data) || data.lng == null || (data.lng is number && data.lng >= -180 && data.lng <= 180));
     }
 
     function counterPath() {
@@ -80,10 +120,11 @@ service cloud.firestore {
     match /blocked_slots/{id} {
       allow read: if isMember() || isAdmin();
       // A private item carries no label and the neutral kind 'busy', so a
-      // friend cannot tell a private plan from the host's private time.
+      // friend cannot tell a private plan from the host's private time. An
+      // open plan is { label: '', kind: 'open' }.
       allow create, update: if isAdmin()
         && request.resource.data.keys().hasOnly(['date', 'slot', 'label', 'kind'])
-        && (request.resource.data.label != '' || request.resource.data.kind == 'busy');
+        && (request.resource.data.label != '' || request.resource.data.kind in ['busy', 'open']);
       allow delete: if isAdmin();
     }
 
@@ -97,26 +138,67 @@ service cloud.firestore {
     }
 
     match /hangouts/{id} {
-      // A friend's query must itself ask for open == true, or it is refused.
-      allow read: if isAdmin() || (isMember() && resource.data.open == true);
+      // A friend's query must itself ask for open == true and full == false,
+      // or it is refused. A full plan is fetched by id by those in it.
+      allow read: if isAdmin() || canSee(id, resource.data);
       // The note stays out: it goes to hangout_private.
       allow create, update: if isAdmin() && !request.resource.data.keys().hasAny(['note']);
       allow delete: if isAdmin();
+      // Joining: one more person, never past the limit, and `full` follows
+      // from the new count (going + the host). Only together with this
+      // device's new joined document.
+      allow update: if isMember()
+        && resource.data.open == true
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['going', 'full'])
+        && request.resource.data.going == resource.data.going + 1
+        && (resource.data.capacity == null || request.resource.data.going + 1 <= resource.data.capacity)
+        && request.resource.data.full == (resource.data.capacity != null
+             && request.resource.data.going + 1 >= resource.data.capacity)
+        && !exists(joinedPath(id, request.auth.uid))
+        && existsAfter(joinedPath(id, request.auth.uid));
 
       match /participants/{pid} {
         // The document id is the lower-cased name, which makes names unique
         // per hangout (a second join with the same name is an update: denied).
-        allow read: if isMember()
-          && get(/databases/$(database)/documents/hangouts/$(id)).data.open == true;
+        allow read: if canSee(id, get(hangoutPath(id)).data);
         allow create: if isMember()
-          && get(/databases/$(database)/documents/hangouts/$(id)).data.open == true
+          && get(hangoutPath(id)).data.open == true
           && request.resource.data.keys().hasOnly(['name', 'created_at'])
           && request.resource.data.keys().hasAll(['name', 'created_at'])
           && request.resource.data.created_at == request.time
           && text(request.resource.data.name, 1, 40)
-          && pid == request.resource.data.name.lower();
+          && pid == request.resource.data.name.lower()
+          && getAfter(joinedPath(id, request.auth.uid)).data.key == pid
+          && goingBumped(id);
         allow read, write: if isAdmin();
       }
+
+      // Which devices joined (their anonymous uid) and as which participant.
+      match /joined/{uid} {
+        allow create: if isMember()
+          && uid == request.auth.uid
+          && request.resource.data.keys().hasOnly(['uid', 'key'])
+          && request.resource.data.keys().hasAll(['uid', 'key'])
+          && request.resource.data.uid == uid
+          && request.resource.data.key is string
+          && !exists(/databases/$(database)/documents/hangouts/$(id)/participants/$(request.resource.data.key))
+          && existsAfter(/databases/$(database)/documents/hangouts/$(id)/participants/$(request.resource.data.key))
+          && goingBumped(id);
+        allow read, write: if isAdmin();
+      }
+    }
+
+    // A device finds the plans it joined: a collection-group query that must
+    // ask for its own uid.
+    match /{path=**}/joined/{uid} {
+      allow read: if isAdmin() || (request.auth != null && resource.data.uid == request.auth.uid);
+    }
+
+    // Where a plan happens: { map_url, lat, lng }. Only the admin and the
+    // devices that joined the plan may read it.
+    match /hangout_places/{id} {
+      allow get: if isMember() && hasJoined(id);
+      allow read, write: if isAdmin();
     }
 
     // The admin-only side of a hangout: { note, receipt (the proposal id) }.
@@ -132,7 +214,8 @@ service cloud.firestore {
     match /proposals/{id} {
       allow create: if isMember()
         && request.resource.data.keys().hasOnly(
-             ['date', 'slot', 'title', 'place', 'proposer_name', 'note', 'status', 'created_at'])
+             ['date', 'slot', 'title', 'place', 'proposer_name', 'note', 'status', 'created_at',
+              'capacity', 'uid', 'map_url', 'lat', 'lng'])
         && request.resource.data.keys().hasAll(
              ['date', 'slot', 'title', 'place', 'proposer_name', 'note', 'status', 'created_at'])
         && request.resource.data.status == 'pending'
@@ -146,13 +229,17 @@ service cloud.firestore {
         && text(request.resource.data.place, 0, 80)
         && text(request.resource.data.proposer_name, 1, 40)
         && text(request.resource.data.note, 0, 280)
-        && !exists(/databases/$(database)/documents/blocked_slots/$(request.resource.data.date + '_' + request.resource.data.slot))
+        && validExtras(request.resource.data)
+        // A taken slot refuses proposals, unless what takes it is an open plan.
+        && (!exists(/databases/$(database)/documents/blocked_slots/$(request.resource.data.date + '_' + request.resource.data.slot))
+            || get(/databases/$(database)/documents/blocked_slots/$(request.resource.data.date + '_' + request.resource.data.slot)).data.kind == 'open')
         && counterBumpedFor(id);
       allow read, update, delete: if isAdmin();
     }
 
     // Rate limit: at most 20 proposals per 24 h window, all friends together.
-    // The window starts with the first proposal after the previous one ended. A proposal must bump this counter in the same batch.
+    // The window starts with the first proposal after the previous one ended.
+    // A proposal must bump this counter in the same batch.
     match /counters/proposals {
       allow update: if isMember()
         && request.resource.data.keys().hasOnly(['count', 'window_start', 'last_id'])

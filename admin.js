@@ -10,9 +10,10 @@ import {
 } from 'firebase/firestore/lite';
 import {
   auth, db, $, el, toast, friendLink, shareOnWhatsApp, wireSheet, renderTimetable, legend, participantDoc,
-  SLOTS, SLOT_IDS, slotById, slotIndex, slotKey, slotHours, LIMITS, tripDays, weekday, formatDay, clean,
-  cleanName, nameKey, todayInBolivia, countdownText, plural, freeText, reservationStatus, randomCode,
-  publicSlots, publicDiff, buildIcs,
+  placePicker, placeView, capacityInput, CAPACITY_ERROR, SLOTS, SLOT_IDS, slotById, slotIndex, slotKey, slotHours, LIMITS, CAPACITY,
+  tripDays, weekday, formatDay, clean, cleanName, nameKey, todayInBolivia, countdownText, plural, freeText,
+  reservationStatus, randomCode, publicSlots, publicDiff, buildIcs, cleanCapacity, isFull, spotsLeft,
+  hasPlace, cleanPlace,
 } from './common.js';
 
 const VIEWS = ['status', 'login', 'not-admin', 'setup', 'panel'];
@@ -29,15 +30,18 @@ const SEED_BLOCKS = [
   ['2027-01-02', ['tarde', 'noche'], 'Vuelo de vuelta'],
 ];
 // Version of the stored data; upgrade() brings older data up to it.
-const SCHEMA = 3;
+const SCHEMA = 4;
 
 // reservations: my own time and blocks, with their real labels (admin-only).
 // hangouts: each one also carries its private side from `hangout_private`
-//   (note, and receipt: the id of the proposal it came from).
+//   (note, and receipt: the id of the proposal it came from) and its place
+//   from `hangout_places` (location: { map_url, lat, lng } or null).
+// joined: hangout id -> [{ uid, key }], the devices that joined it.
 // blocked: the public projection friends read, id -> document (publicSlots).
 // open: { date, slotId } of the slot shown in the sheet.
 const state = {
-  settings: null, proposals: [], hangouts: [], participants: new Map(), reservations: [], blocked: new Map(), open: null,
+  settings: null, proposals: [], hangouts: [], participants: new Map(), joined: new Map(), reservations: [],
+  blocked: new Map(), open: null,
 };
 
 const bySlot = (a, b) =>
@@ -108,6 +112,13 @@ async function act(fn, done) {
 // never reuses the id of the proposal it came from: that id opens the receipt.
 const newHangoutId = () => doc(collection(db, 'hangouts')).id;
 
+// How many people a hangout holds: the limit (whole gathering, me included;
+// null for none), how many others are going, and whether that fills it.
+const headcount = (capacity, going) => ({ capacity, going, full: isFull(capacity, going) });
+
+// The place a form or a proposal holds, as stored in hangout_places.
+const placeOf = (item) => cleanPlace({ url: item.map_url, lat: item.lat, lng: item.lng });
+
 // What the proposer's device reads, by the proposal id, to show its own plan
 // even while it is private.
 const receiptFor = (status, item, hangout) => ({
@@ -158,33 +169,40 @@ async function copy(text) {
 
 async function refresh() {
   try {
-    const [settings, proposals, hangouts, privates, participants, reservations, blocked] = await Promise.all([
+    const [settings, proposals, hangouts, privates, places, participants, joined, reservations, blocked] = await Promise.all([
       getDoc(doc(db, 'settings', 'main')),
       getDocs(collection(db, 'proposals')),
       getDocs(collection(db, 'hangouts')),
       getDocs(collection(db, 'hangout_private')),
+      getDocs(collection(db, 'hangout_places')),
       getDocs(collectionGroup(db, 'participants')),
+      getDocs(collectionGroup(db, 'joined')),
       getDocs(collection(db, 'reservations')),
       getDocs(collection(db, 'blocked_slots')),
     ]);
     if (!settings.exists()) return show('setup');
     const rows = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     const privateOf = new Map(privates.docs.map((d) => [d.id, d.data()]));
+    const placeOf = new Map(places.docs.map((d) => [d.id, d.data()]));
     state.settings = settings.data();
     state.proposals = rows(proposals).sort(bySlot);
     // Hangouts from before schema 3 still carry their note; upgrade() moves it.
     state.hangouts = rows(hangouts)
-      .map((h) => ({ ...h, note: h.note ?? '', receipt: null, ...privateOf.get(h.id) }))
+      .map((h) => ({ ...h, note: h.note ?? '', receipt: null, ...privateOf.get(h.id), location: placeOf.get(h.id) ?? null }))
       .sort(bySlot);
     state.reservations = rows(reservations).sort(bySlot);
     state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
-    state.participants = new Map();
-    for (const d of participants.docs) {
-      const hangoutId = d.ref.parent.parent.id;
-      const list = state.participants.get(hangoutId) || [];
-      list.push({ key: d.id, ...d.data() });
-      state.participants.set(hangoutId, list);
-    }
+    // Both are subcollections of a hangout: group them by its id.
+    const byHangout = (snap, row) => {
+      const groups = new Map();
+      for (const d of snap.docs) {
+        const hangoutId = d.ref.parent.parent.id;
+        groups.set(hangoutId, [...(groups.get(hangoutId) || []), row(d)]);
+      }
+      return groups;
+    };
+    state.participants = byHangout(participants, (d) => ({ key: d.id, ...d.data() }));
+    state.joined = byHangout(joined, (d) => d.data());
     // An upgrade changes the data underneath: load it again.
     if (await upgrade()) return refresh();
     render();
@@ -220,6 +238,13 @@ async function upgrade() {
       if (h.note) tx.set(['hangout_private', h.id], { note: h.note });
     }
   }
+  // 4: limits. Every hangout counts who is going and says whether it is full
+  // (friends' joins and the rules rely on both), with no limit by default.
+  if (schema < 4) {
+    for (const h of state.hangouts) {
+      tx.update(['hangouts', h.id], headcount(h.capacity ?? null, peopleOf(h).length));
+    }
+  }
   if (schema < SCHEMA) tx.update(['settings', 'main'], { schema: SCHEMA });
   const wrote = await tx.commit();
   return wrote && schema < SCHEMA;
@@ -244,6 +269,7 @@ const hangoutsAt = (date, slotId) => state.hangouts.filter((h) => h.date === dat
 const pendingAt = (date, slotId) =>
   state.proposals.filter((p) => p.status === 'pending' && p.date === date && p.slot === slotId);
 const peopleOf = (hangout) => state.participants.get(hangout.id) || [];
+const joinedOf = (hangout) => state.joined.get(hangout.id) || [];
 const namesOf = (hangout) => peopleOf(hangout).map((p) => p.name);
 const slotName = (item) => slotById[item.slot]?.label ?? item.slot;
 const whenText = (item) => `${formatDay(item.date)}, ${slotName(item).toLowerCase()}`;
@@ -329,11 +355,22 @@ function conflictsFor(proposal) {
   return warnings;
 }
 
+// "Hasta 6 personas, contándome. Quedan 2 plazas." or null without a limit.
+function capacityText(capacity, going) {
+  if (capacity == null) return null;
+  if (isFull(capacity, going)) return `Completo: ${capacity} personas, contándome.`;
+  const spots = spotsLeft(capacity, going);
+  return `Hasta ${capacity} personas, contándome. ${spots === 1 ? 'Queda 1 plaza' : `Quedan ${spots} plazas`}.`;
+}
+
 function proposalText(p) {
+  const limit = p.capacity == null ? null : `Hasta ${p.capacity} personas, contándote.`;
   return [
     el('h3', {}, p.title),
     el('p', {}, `${p.proposer_name} propone esto para el ${whenText(p)}${p.place ? ', en ' + p.place : ''}.`),
+    limit ? el('p', {}, limit) : null,
     p.note ? el('p', { class: 'note' }, `«${p.note}»`) : null,
+    placeView(placeOf(p), p.title),
   ];
 }
 
@@ -478,17 +515,21 @@ function renderSheet() {
 }
 
 function renderHangout(h) {
+  const limit = capacityText(h.capacity ?? null, peopleOf(h).length);
   return el('div', { class: 'entry is-plan' },
     el('h3', {}, h.title),
     el('p', {}, `Lo propuso ${h.proposer_name}${h.place ? ', en ' + h.place : ''}.`),
     h.note ? el('p', { class: 'note' }, `«${h.note}»`) : null,
-    el('p', {}, h.open ? 'Abierto: mis amigos lo ven y se pueden apuntar.' : 'Privado: los demás solo ven «Ocupado».'),
+    el('p', {}, h.open
+      ? (h.full ? 'Abierto y completo: quien no se apuntó ve «Ocupado».' : 'Abierto: mis amigos lo ven y se pueden apuntar.')
+      : 'Privado: los demás solo ven «Ocupado».'),
+    limit ? el('p', {}, limit) : null,
+    placeView(h.location, h.title),
     el('ul', { class: 'chips', 'aria-label': 'Quién viene' },
       peopleOf(h).map((person) => el('li', {}, person.name,
         el('button', {
           type: 'button', 'aria-label': `Quitar a ${person.name}`,
-          onclick: () => confirm(`¿Quitar a ${person.name} de «${h.title}»?`)
-            && act((tx) => tx.delete(['hangouts', h.id, 'participants', person.key]), 'Quitado.'),
+          onclick: () => removeParticipant(h, person),
         }, '×'))),
       el('li', { class: 'add' }, el('button', { type: 'button', onclick: () => addParticipant(h) }, 'Añadir persona'))),
     el('div', { class: 'actions' },
@@ -512,6 +553,12 @@ function reserveForm(date, slot) {
     el('option', { value: 'private' }, 'Solo yo. Mis amigos ven «Ocupado»'),
     el('option', { value: 'open' }, 'Mis amigos ven el texto'),
     el('option', { value: 'join' }, 'Mis amigos ven el texto y se pueden apuntar'));
+  // Only for a plan friends can join: how many fit, and where.
+  const capacity = capacityInput();
+  const picker = placePicker();
+  const joinFields = el('div', { hidden: true },
+    el('label', {}, 'Máximo de personas, contándome (opcional)', capacity), picker.node);
+  who.addEventListener('change', () => { joinFields.hidden = who.value !== 'join'; });
   const form = el('form', { class: 'reserve' },
     el('h3', {}, 'Reservar para mí'),
     el('label', {}, '¿Para qué?', label),
@@ -519,11 +566,15 @@ function reserveForm(date, slot) {
       el('button', { type: 'button', class: 'btn small', onclick: () => { label.value = name; } }, name))),
     el('label', {}, '¿Cuándo?', repeat),
     el('label', {}, '¿Quién lo ve?', who),
+    joinFields,
     el('button', { type: 'submit', class: 'btn primary' }, 'Reservar'));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     const text = clean(label.value, LIMITS.title);
     if (!text) return;
+    const limit = who.value === 'join' ? cleanCapacity(capacity.value) : null;
+    if (limit === undefined) return toast(CAPACITY_ERROR);
+    const place = picker.value();
     const days = tripDays(state.settings.trip_start, state.settings.trip_end);
     const targets = {
       once: [{ date, slot: slot.id }],
@@ -542,9 +593,12 @@ function reserveForm(date, slot) {
       for (const t of fresh) {
         // Something friends can join is a plan of mine; anything else is reserved time.
         if (joinable) {
-          tx.set(['hangouts', newHangoutId()], {
-            date: t.date, slot: t.slot, title: text, place: '', proposer_name: HOST, open: true, created_at: serverTimestamp(),
+          const id = newHangoutId();
+          tx.set(['hangouts', id], {
+            date: t.date, slot: t.slot, title: text, place: '', proposer_name: HOST, open: true,
+            ...headcount(limit, 0), created_at: serverTimestamp(),
           });
+          if (hasPlace(place)) tx.set(['hangout_places', id], place);
         } else {
           tx.set(['reservations', slotKey(t.date, t.slot)], { date: t.date, slot: t.slot, label: text, kind: 'personal', open: who.value === 'open' });
         }
@@ -561,19 +615,25 @@ function reserveForm(date, slot) {
 // ---- Actions ----
 
 // Approving moves the proposal into `hangouts`, the only collection friends
-// can read, adds the proposer as the first participant, and keeps the note
-// and the proposal id on the private side.
+// can read, adds the proposer as the first participant (and their device as
+// joined, so they keep seeing the plan and its place when it fills up), and
+// keeps the note and the proposal id on the private side.
 function approve(p, open = false) {
   return act((tx) => {
     const id = newHangoutId();
+    const name = cleanName(p.proposer_name);
     tx.set(['hangouts', id], {
       date: p.date, slot: p.slot, title: p.title, place: p.place,
-      proposer_name: p.proposer_name, open, created_at: p.created_at ?? serverTimestamp(),
+      proposer_name: p.proposer_name, open, ...headcount(p.capacity ?? null, name ? 1 : 0),
+      created_at: p.created_at ?? serverTimestamp(),
     });
     tx.set(['hangout_private', id], { note: p.note, receipt: p.id });
+    if (hasPlace(placeOf(p))) tx.set(['hangout_places', id], placeOf(p));
     tx.set(['receipts', p.id], receiptFor('approved', p, id));
-    const name = cleanName(p.proposer_name);
-    if (name) tx.set(['hangouts', id, 'participants', nameKey(name)], participantDoc(name));
+    if (name) {
+      tx.set(['hangouts', id, 'participants', nameKey(name)], participantDoc(name));
+      if (p.uid) tx.set(['hangouts', id, 'joined', p.uid], { uid: p.uid, key: nameKey(name) });
+    }
     tx.delete(['proposals', p.id]);
   }, open ? 'Aprobado y abierto: tus amigos lo ven.' : `Aprobado. Solo ${p.proposer_name} y tú lo ven.`);
 }
@@ -593,17 +653,34 @@ function removeHangout(h) {
   if (!confirm(`¿Borrar el plan «${h.title}»? Tus amigos dejan de verlo.`)) return;
   act((tx) => {
     for (const person of peopleOf(h)) tx.delete(['hangouts', h.id, 'participants', person.key]);
+    for (const device of joinedOf(h)) tx.delete(['hangouts', h.id, 'joined', device.uid]);
     tx.delete(['hangouts', h.id]);
     tx.delete(['hangout_private', h.id]);
+    tx.delete(['hangout_places', h.id]);
     // Plans approved before schema 3 have their receipt under their own id.
     tx.set(['receipts', h.receipt ?? h.id], { status: 'rejected' });
   }, 'Plan borrado.');
 }
 
+// Someone joining from here has no device behind them: they are counted, but
+// only the name says they are in.
 function addParticipant(h) {
   const name = cleanName(prompt(`¿Quién más viene a «${h.title}»?`) || '');
   if (!name) return;
-  act((tx) => tx.set(['hangouts', h.id, 'participants', nameKey(name)], participantDoc(name)), 'Añadido.');
+  if (peopleOf(h).some((person) => person.key === nameKey(name))) return toast(`${name} ya está apuntado.`);
+  act((tx) => {
+    tx.set(['hangouts', h.id, 'participants', nameKey(name)], participantDoc(name));
+    tx.update(['hangouts', h.id], headcount(h.capacity ?? null, peopleOf(h).length + 1));
+  }, 'Añadido.');
+}
+
+function removeParticipant(h, person) {
+  if (!confirm(`¿Quitar a ${person.name} de «${h.title}»?`)) return;
+  act((tx) => {
+    tx.delete(['hangouts', h.id, 'participants', person.key]);
+    for (const device of joinedOf(h).filter((j) => j.key === person.key)) tx.delete(['hangouts', h.id, 'joined', device.uid]);
+    tx.update(['hangouts', h.id], headcount(h.capacity ?? null, peopleOf(h).length - 1));
+  }, 'Quitado.');
 }
 
 // ---- Edit dialog (a pending proposal or a confirmed plan) ----
@@ -614,12 +691,16 @@ editFields.place.maxLength = LIMITS.place;
 editFields.proposer_name.maxLength = LIMITS.name;
 editFields.note.maxLength = LIMITS.note;
 editFields.slot.replaceChildren(...SLOTS.map((s) => el('option', { value: s.id }, s.label)));
+Object.assign(editFields.capacity, { min: CAPACITY.min, max: CAPACITY.max });
 
-let editing = null; // { collectionName, item }
+let editing = null; // { collectionName, item, picker }
 
 function openEdit(collectionName, item) {
-  editing = { collectionName, item };
+  const picker = placePicker(collectionName === 'proposals' ? placeOf(item) : item.location ?? {});
+  editing = { collectionName, item, picker };
   for (const name of ['date', 'slot', 'title', 'place', 'proposer_name', 'note']) editFields[name].value = item[name] ?? '';
+  editFields.capacity.value = item.capacity ?? '';
+  $('edit-place').replaceChildren(picker.node);
   $('edit-dialog').showModal();
 }
 
@@ -636,20 +717,25 @@ $('edit-form').addEventListener('submit', (event) => {
     note: clean(editFields.note.value, LIMITS.note),
   };
   if (!editing || !data.title || !data.proposer_name) return;
-  const { collectionName, item } = editing;
+  const capacity = cleanCapacity(editFields.capacity.value);
+  if (capacity === undefined) return toast(CAPACITY_ERROR);
+  const { collectionName, item, picker } = editing;
+  const place = picker.value();
   $('edit-dialog').close();
   // The slot may have changed: follow the item to its new place.
   if ($('sheet').open) state.open = { date: data.date, slotId: data.slot };
   act((tx) => {
     if (collectionName === 'proposals') {
-      tx.update(['proposals', item.id], data);
+      tx.update(['proposals', item.id], { ...data, capacity, ...place });
       // The proposer's page shows their proposal where it is now.
       tx.set(['receipts', item.id], receiptFor('pending', data));
       return;
     }
     const { note, ...shared } = data;
-    tx.update(['hangouts', item.id], shared);
+    tx.update(['hangouts', item.id], { ...shared, ...headcount(capacity, peopleOf(item).length) });
     tx.set(['hangout_private', item.id], { note, ...(item.receipt ? { receipt: item.receipt } : {}) });
+    if (hasPlace(place)) tx.set(['hangout_places', item.id], place);
+    else tx.delete(['hangout_places', item.id]);
     // Plans approved before schema 3 share their id with their receipt, and
     // friends may know that id, so their receipt only ever says 'approved'.
     if (item.receipt) tx.set(['receipts', item.receipt], receiptFor('approved', data, item.id));

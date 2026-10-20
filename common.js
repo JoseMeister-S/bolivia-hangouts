@@ -5,7 +5,9 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, connectAuthEmulator } from 'firebase/auth';
 import { getFirestore, connectFirestoreEmulator, serverTimestamp } from 'firebase/firestore/lite';
 import { firebaseConfig } from './config.js';
-import { SLOTS, formatDay, dayParts, weekday } from './lib.js';
+import {
+  SLOTS, HOME, CAPACITY, formatDay, dayParts, weekday, parseLocation, cleanPlace, cleanMapUrl, hasPlace, mapLinks,
+} from './lib.js';
 
 export * from './lib.js';
 
@@ -88,14 +90,146 @@ export function wireSheet() {
   sheet.addEventListener('click', (event) => { if (event.target === sheet) sheet.close(); });
 }
 
+// ---- How many people ----
+
+// "How many people at most": empty means no limit.
+export const capacityInput = () => el('input', {
+  name: 'capacity', type: 'number', min: CAPACITY.min, max: CAPACITY.max, step: 1, inputMode: 'numeric', placeholder: 'Sin límite',
+});
+export const CAPACITY_ERROR = `El máximo tiene que ser un número entre ${CAPACITY.min} y ${CAPACITY.max}.`;
+
+// ---- Maps ----
+
+// Leaflet loads from the CDN the first time a map is shown; the tiles come
+// from OpenStreetMap.
+const LEAFLET = 'https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/';
+let leaflet = null;
+function loadLeaflet() {
+  leaflet ??= new Promise((resolve, reject) => {
+    document.head.append(el('link', { rel: 'stylesheet', href: LEAFLET + 'leaflet.css' }));
+    document.head.append(el('script', {
+      src: LEAFLET + 'leaflet.js',
+      onload: () => resolve(window.L),
+      onerror: () => { leaflet = null; reject(new Error('Leaflet did not load')); },
+    }));
+  });
+  return leaflet;
+}
+
+// Runs fn once the element is in the page and has a size: Leaflet needs both.
+function whenShown(node, fn) {
+  const observer = new ResizeObserver(([entry]) => {
+    if (!entry.contentRect.width) return;
+    observer.disconnect();
+    fn();
+  });
+  observer.observe(node);
+}
+
+async function drawMap(box, { lat, lng, zoom }) {
+  const L = await loadLeaflet();
+  const map = L.map(box, { scrollWheelZoom: false }).setView([lat, lng], zoom);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap',
+  }).addTo(map);
+  new ResizeObserver(() => map.invalidateSize()).observe(box);
+  return { L, map };
+}
+
+const pinIcon = (L) => L.divIcon({ className: 'pin', html: '<span></span>', iconSize: [28, 36], iconAnchor: [14, 34] });
+const PIN_ZOOM = 16;
+
+// Where a plan happens: paste a map link (or "lat, lng"), or tap the map, and
+// drag the pin to adjust it. initial and value() are { map_url, lat, lng }.
+export function placePicker(initial = {}) {
+  let pin = initial.lat != null ? { lat: initial.lat, lng: initial.lng } : null;
+  let L = null;
+  let map = null;
+  let marker = null;
+  const link = el('input', {
+    name: 'map_url', type: 'url', inputMode: 'url', autocomplete: 'off', value: initial.map_url || '',
+    placeholder: 'Pega un enlace de Google Maps o toca el mapa',
+  });
+  const hint = el('span', { class: 'hint' });
+  const box = el('div', { class: 'map' });
+
+  const showHint = () => {
+    hint.textContent = pin ? 'Pin puesto. Puedes arrastrarlo para ajustarlo.'
+      : link.value.trim() ? 'Este enlace no trae coordenadas. Toca el mapa para poner el pin.'
+      : 'Opcional. Solo lo ven Jose y quienes se apunten.';
+  };
+  const setPin = (point, center = true) => {
+    pin = point;
+    marker?.remove();
+    marker = null;
+    if (map && pin) {
+      marker = L.marker([pin.lat, pin.lng], { icon: pinIcon(L), draggable: true, keyboard: false }).addTo(map);
+      marker.on('dragend', () => { pin = cleanPlace(marker.getLatLng()); });
+      if (center) map.setView([pin.lat, pin.lng], Math.max(map.getZoom(), PIN_ZOOM));
+    }
+    showHint();
+  };
+
+  link.addEventListener('input', () => {
+    const point = parseLocation(link.value);
+    if (point) setPin(point);
+    else showHint();
+  });
+  whenShown(box, async () => {
+    try {
+      ({ L, map } = await drawMap(box, pin ? { ...pin, zoom: PIN_ZOOM } : HOME));
+      map.on('click', (event) => setPin(cleanPlace(event.latlng), false));
+      setPin(pin, false);
+    } catch {
+      box.classList.add('is-error');
+      box.textContent = 'No se pudo cargar el mapa. Pega un enlace con coordenadas.';
+    }
+  });
+  showHint();
+
+  return {
+    node: el('div', { class: 'place-picker' },
+      el('label', {}, 'Ubicación (opcional)', link, hint),
+      box,
+      el('button', { type: 'button', class: 'btn text small', onclick: () => { link.value = ''; setPin(null); } }, 'Quitar ubicación')),
+    value: () => cleanPlace({ url: link.value, lat: pin?.lat, lng: pin?.lng }),
+  };
+}
+
+// A plan's place for those who may see it: a small map with the pin and links
+// to open it in Google Maps or Apple Maps. A link without a pin is just a link.
+export function placeView(place, label = '') {
+  if (!hasPlace(place)) return null;
+  const open = (href, text, extra = '') => el('a', { class: 'btn small' + extra, href, target: '_blank', rel: 'noopener' }, text);
+  const links = [];
+  let box = null;
+  if (place.lat != null) {
+    const { google, apple } = mapLinks(place, label);
+    links.push(open(google, 'Abrir en Google Maps'), open(apple, 'Abrir en Apple Maps'));
+    box = el('div', { class: 'map is-small' });
+    whenShown(box, async () => {
+      try {
+        const { L, map } = await drawMap(box, { ...place, zoom: PIN_ZOOM });
+        L.marker([place.lat, place.lng], { icon: pinIcon(L), keyboard: false }).addTo(map);
+      } catch {
+        box.remove();
+      }
+    });
+  }
+  const url = cleanMapUrl(place.map_url);
+  if (url) links.push(open(url, place.lat != null ? 'Enlace original' : 'Abrir el enlace del mapa', place.lat != null ? ' text' : ''));
+  return el('div', { class: 'place' }, box, el('div', { class: 'actions' }, links));
+}
+
 // ---- Timetable ----
 
 // The trip as a timetable, one week (at most 7 days) on screen at a time:
 // a row per day, a column per slot, every cell filled with what is in it.
 // Weeks sit side by side; swipe sideways or use the week buttons.
 //
-// cellFor(date, slotId) returns { status, title, sub, more, alert, open, merge }:
-//   status  'free' | 'gone' | 'plan' | 'wait' | 'own' | 'off'
+// cellFor(date, slotId) returns { status, title, sub, more, alert, open, joinable, merge }:
+//   status    'free' | 'gone' | 'plan' | 'wait' | 'own' | 'off'
+//   joinable  an open plan with room that the visitor is not in yet
 //   merge   neighbouring cells with the same merge key are drawn as one
 //           (an all-day "Navidad en familia" reads once, not four times)
 let shownWeek = null; // survives re-renders, so the view does not jump back
@@ -134,7 +268,8 @@ export function renderTimetable({ days, today, cellFor, onPick }) {
       el('span', { class: 'tt-day' }, el('small', {}, parts.weekday), parts.day),
       cells.map((cell) => el('button', {
         type: 'button',
-        class: `tt-cell is-${cell.status}` + (cell.alert ? ' is-alert' : '') + (cell.open ? ' is-open' : ''),
+        class: `tt-cell is-${cell.status}` + (cell.alert ? ' is-alert' : '') + (cell.open ? ' is-open' : '')
+          + (cell.joinable ? ' is-joinable' : ''),
         style: cell.span > 1 ? `grid-column: span ${cell.span}` : null,
         disabled: cell.status === 'gone',
         'aria-label': `${formatDay(date)}, ${cell.span === SLOTS.length ? 'todo el día' : cell.slot.label}: ${cell.title || 'libre'}`,

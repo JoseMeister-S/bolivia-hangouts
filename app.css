@@ -253,6 +253,29 @@ main > section, #panel > section { margin-top: 3rem; }
 .swatch.is-open { position: relative; }
 .swatch.is-open::after { top: .2rem; right: .2rem; width: .3rem; height: .3rem; }
 .tt-cell.is-open .tt-t { padding-right: .6rem; }
+/* Friends' page: an open plan with room is drawn open, outlined in the plan
+   color over a light tint, with a "+": come in. A solid block is a plan you
+   are in. */
+:is(.tt-cell, .swatch).is-plan.is-joinable {
+  background: color-mix(in srgb, var(--plan) 18%, var(--paper));
+  color: var(--ink);
+  box-shadow: inset 0 0 0 2px var(--plan);
+}
+.tt-cell.is-joinable::after {
+  content: "+";
+  position: absolute;
+  top: .05rem;
+  right: .3rem;
+  color: var(--plan);
+  font-size: 1.35rem;
+  font-weight: 800;
+  line-height: 1;
+}
+@media (prefers-color-scheme: dark) {
+  .tt-cell.is-joinable::after { color: var(--ink); }
+  :is(.tt-cell, .swatch).is-plan.is-joinable { background: color-mix(in srgb, var(--plan) 45%, var(--paper)); box-shadow: inset 0 0 0 2px #b0694a; }
+}
+.tt-cell.is-joinable .tt-t { padding-right: .9rem; }
 /* A clash (two plans, or a plan on reserved time) gets a heavy frame. */
 .is-alert { outline: 3px solid var(--ink); outline-offset: -3px; }
 
@@ -297,6 +320,35 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .tools { margin-top: 2rem; }
 .tools p { margin: 0; color: var(--soft); }
 .presets { margin: -.35rem 0 .85rem; }
+
+/* ---- Maps ---- */
+
+.map {
+  height: 12rem;
+  margin: .25rem 0 .4rem;
+  border: 1.5px solid var(--field);
+  border-radius: 6px;
+  overflow: hidden;
+  isolation: isolate; /* keep Leaflet's layers under the page's own */
+}
+.map.is-small { height: 9rem; }
+.map.is-error { display: grid; place-items: center; height: auto; padding: 1rem; color: var(--soft); font-size: .875rem; }
+.place-picker { margin-bottom: .85rem; }
+.place-picker label { margin-bottom: 0; }
+.place { margin: .5rem 0; }
+.place .actions { margin-top: .25rem; }
+/* The pin: a teardrop in the plan color with a white rim. */
+.pin span {
+  display: block;
+  width: 22px;
+  height: 22px;
+  margin: 2px 3px;
+  border: 2.5px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  background: var(--mahogany);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .45);
+  transform: rotate(-45deg);
+}
 
 /* ---- 404 page ---- */
 
