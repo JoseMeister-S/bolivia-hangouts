@@ -47,6 +47,8 @@ const browser = await launch();
 async function open(url, options = {}) {
   const context = await browser.newContext({ ...PHONE, acceptDownloads: true, reducedMotion: 'reduce', ...options });
   await context.clock.setFixedTime(TODAY);
+  // Map tiles are not part of the test: answer them empty.
+  await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 204 }));
   const page = await context.newPage();
   const answers = [];
   page.answer = (text) => answers.push(text);
@@ -359,6 +361,96 @@ try {
   check(await cellHas(caro, '2026-12-15', 0, 'is-free') && await cellHas(caro, '2026-12-24', 2, 'is-free'),
     'friends see removed reservations as free');
 
+  // ---- A plan with a limit and a place: inviting while it has room, "Ocupado" once full
+  const G = '2026-12-23'; // a Wednesday; the gym mornings are gone by now
+  caro.answer('Caro');
+  await caro.getByRole('button', { name: 'Cambiar nombre' }).click();
+  await caro.waitForFunction(() => document.getElementById('hello').textContent.includes('Caro'));
+  await caro.getByRole('button', { name: '21 al 27 dic' }).click();
+  await cell(caro, G, 3).click();
+  await caro.waitForSelector('#sheet[open] .propose');
+  await caro.fill('.propose input[name=title]', 'Juegos de mesa');
+  await caro.fill('.propose input[name=capacity]', '3'); // Jose, Caro and one more
+  await caro.fill('.propose input[name=map_url]',
+    'https://www.google.com/maps/place/Ludoteca/@-17.38,-66.15,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d-17.3934!4d-66.1571');
+  await caro.waitForFunction(() => document.querySelector('.propose .place-picker .hint').textContent.startsWith('Pin puesto'));
+  check(await caro.locator('.propose .leaflet-marker-icon').count() === 1, 'a pasted Google Maps link drops the pin on the map');
+  await caro.click('.propose button[type=submit]');
+  await cellBecomes(caro, G, 3, 'is-wait');
+
+  await reloaded(admin, '#pending .entry');
+  const proposal = admin.locator('#pending .entry', { hasText: 'Juegos de mesa' });
+  check((await proposal.innerText()).includes('Hasta 3 personas') && await proposal.locator('.place .map').count() === 1,
+    'the host sees the limit and the place of a proposal');
+  await proposal.locator('input[type=checkbox]').check();
+  await proposal.getByRole('button', { name: 'Aprobar' }).click();
+  await cellBecomes(admin, G, 3, 'is-plan');
+
+  await reloaded(luis);
+  await luis.getByRole('button', { name: '21 al 27 dic' }).click();
+  check(await cellHas(luis, G, 3, 'is-joinable'), 'an open plan with room looks joinable');
+  check(!(await cellHas(luis, '2026-12-18', 0, 'is-joinable')), 'a plan the friend is already in does not');
+  await cell(luis, G, 3).click();
+  await luis.waitForSelector('#sheet[open] .join');
+  check((await luis.innerText('#sheet-body')).includes('Queda 1 plaza') && await luis.locator('#sheet-body .place').count() === 0,
+    'before joining: one place left, and no map');
+  await luis.getByRole('button', { name: 'Me apunto' }).click();
+  await luis.waitForSelector('#sheet-body .done');
+  await luis.waitForSelector('#sheet-body .place .leaflet-marker-icon');
+  const google = await luis.locator('#sheet-body').getByRole('link', { name: 'Abrir en Google Maps' }).getAttribute('href');
+  const apple = await luis.locator('#sheet-body').getByRole('link', { name: 'Abrir en Apple Maps' }).getAttribute('href');
+  check(google.includes('query=-17.3934%2C-66.1571') && apple.startsWith('https://maps.apple.com/?ll=-17.3934%2C-66.1571'),
+    'once in, the friend sees the map and can open it in Google Maps or Apple Maps');
+  await shot(luis, 'friend-place');
+  await luis.click('#sheet-close');
+  check((await cellText(luis, G, 3)).startsWith('Juegos de mesa') && !(await cellHas(luis, G, 3, 'is-joinable')),
+    'the joiner still sees the full plan');
+
+  const ana = await open(friendUrl);
+  await ana.waitForSelector(FRESH);
+  check((await cellText(ana, G, 3)) === 'Ocupado' && !(await cellHas(ana, G, 3, 'is-joinable')), 'a full plan is "Ocupado" for the rest');
+  check(!(await pageText(ana)).includes('Juegos de mesa') && !(await savedCopy(ana)).includes('Juegos de mesa'),
+    'a friend who is not in it holds nothing of the full plan');
+  await ana.getByRole('button', { name: '21 al 27 dic' }).click();
+  await cell(ana, G, 3).click();
+  await ana.waitForSelector('#sheet[open]');
+  check(await ana.locator('#sheet-body form').count() === 0, 'a full plan offers no form');
+  await shot(ana, 'friend-full-plan');
+
+  await reloaded(caro);
+  await caro.getByRole('button', { name: '21 al 27 dic' }).click();
+  check((await cellText(caro, G, 3)) === 'Juegos de mesa Completo', 'the proposer still sees the full plan');
+  await cell(caro, G, 3).click();
+  await caro.waitForSelector('#sheet-body .place .leaflet-marker-icon');
+  check(true, 'and its place');
+  await caro.click('#sheet-close');
+
+  await reloaded(admin, '#panel:not([hidden])');
+  await admin.getByRole('button', { name: '21 al 27 dic' }).click();
+  await cell(admin, G, 3).click();
+  await admin.waitForSelector('#sheet[open] .entry.is-plan');
+  check((await admin.innerText('#sheet-body')).includes('Completo: 3 personas'), 'the host sees that the plan is full');
+
+  // ---- The host makes a plan from a short link (no coordinates): tap the map
+  await admin.click('#sheet-close');
+  await cell(admin, G, 2).click();
+  await admin.waitForSelector('#sheet[open] .reserve');
+  await admin.fill('.reserve input[name=label]', 'Pádel');
+  await admin.selectOption('.reserve select[name=who]', 'join');
+  await admin.fill('.reserve input[name=capacity]', '4');
+  await admin.fill('.reserve input[name=map_url]', 'https://maps.app.goo.gl/AbCd123');
+  await admin.waitForSelector('.reserve .map.leaflet-container');
+  check((await admin.innerText('.reserve .place-picker .hint')).startsWith('Este enlace no trae coordenadas'),
+    'a short link asks for a tap on the map');
+  await admin.locator('.reserve .map').click();
+  await admin.waitForFunction(() => document.querySelector('.reserve .place-picker .hint').textContent.startsWith('Pin puesto'));
+  await shot(admin, 'admin-place-picker');
+  await admin.locator('.reserve button[type=submit]').click();
+  await cellBecomes(admin, G, 2, 'is-plan');
+  const places = (await rest('hangout_places')).documents || [];
+  check(places.some((d) => d.fields.map_url?.stringValue === 'https://maps.app.goo.gl/AbCd123' && 'doubleValue' in (d.fields.lat || {})),
+    'the plan keeps the short link and the tapped pin');
+
   // ---- Data from the previous version is upgraded when the admin page opens
   // (written with the emulator's owner access, as the live data looks today).
   await rest('settings/main?updateMask.fieldPaths=schema', 'PATCH', { schema: { integerValue: '2' } });
@@ -376,7 +468,9 @@ try {
   await reloaded(admin, '#panel:not([hidden])');
   const [settingsDoc, legacyDoc, legacyPrivate, legacyMarker] = await Promise.all(
     ['settings/main', 'hangouts/legacy', 'hangout_private/legacy', 'blocked_slots/2026-12-28_noche'].map((p) => rest(p)));
-  check(settingsDoc.fields?.schema?.integerValue === '3', 'upgrade: the schema is now 3');
+  check(settingsDoc.fields?.schema?.integerValue === '4', 'upgrade: the schema is now 4');
+  check(legacyDoc.fields?.going?.integerValue === '0' && legacyDoc.fields?.full?.booleanValue === false
+    && 'nullValue' in (legacyDoc.fields?.capacity || {}), 'upgrade: an old plan gets its count, no limit, not full');
   check(legacyDoc.fields && !('note' in legacyDoc.fields), 'upgrade: the note left the hangout friends may read');
   check(legacyPrivate.fields?.note?.stringValue === 'Nota antigua', 'upgrade: the note is kept on the private side');
   check(legacyMarker.fields?.kind?.stringValue === 'busy', 'upgrade: an old private marker loses its telling kind');

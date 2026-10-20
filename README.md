@@ -28,6 +28,23 @@ are used only for display and for the `.ics` export.
 | `index.html?c=CODE` | Friends | The trip as a timetable, one week (at most 7 days) on screen, the other weeks a swipe away: a row per day, a column per slot. A friend sees free slots, slots that are taken ("Ocupado"), the plans you marked open, and their own proposals. Tap a free slot to propose a plan, tap an open plan to join it. The name is asked for once, in the first form that needs it. |
 | `admin.html` | The host | Google sign-in. The same timetable with pending proposals and clashes marked. Tap a slot to approve, reject or edit what is in it, manage who is coming, switch an item between private and open, or reserve the slot for yourself (for example the gym on weekday mornings, in one step) and choose who sees it. Below it: the queue to confirm, who you spend the most time with, your reservations, the invite link and code rotation, and the `.ics` export. |
 
+### Limits and places
+
+- **How many people.** A plan can have a limit: the size of the whole
+  gathering, Jose included (a board-game night for 6 is Jose and 5 friends).
+  The proposer sets it, and Jose can set or change it. While a plan has room,
+  friends who are not in it see it outlined with a "+" and the places left.
+  Once it is full, everyone who is not in it sees a plain "Ocupado", exactly
+  like a private plan; the people in it still see it as theirs.
+- **Where.** A plan can carry a place: paste a link from Google Maps, Apple
+  Maps or OpenStreetMap (or "lat, lng") and the pin drops on its own, or tap
+  the map and drag the pin. Short share links (`maps.app.goo.gl/...`) carry
+  no coordinates, so the form keeps the link and asks for a tap on the map.
+  The map is [Leaflet](https://leafletjs.com) with OpenStreetMap tiles, and
+  has buttons to open the pin in Google Maps or Apple Maps. Only Jose and the
+  people in the plan see the pin and the links; everyone else sees at most
+  the place name.
+
 ## Design
 
 Six colors, each with one job: alabaster is the page, obsidian the ink, mahogany
@@ -45,9 +62,10 @@ the system setting.
   in each page maps `firebase/app`, `firebase/auth` and
   `firebase/firestore/lite` to the CDN, so the Firebase version is written
   only in the two HTML files.
-- The friends' page asks for the settings, the taken slots, the open plans and
-  its own receipts at the same time; only the names of who is coming wait for
-  the open plans.
+- The friends' page asks for the settings, the taken slots, the open plans,
+  the plans this device joined and its own receipts at the same time; only
+  the names of who is coming and the places wait for the plans.
+- Leaflet (from jsDelivr) and the map tiles load only when a map is shown.
 - The friends' page keeps the last timetable it loaded in the browser and
   shows it at once on the next visit, then replaces it with fresh data. The
   copy holds only what that friend was allowed to read.
@@ -106,7 +124,20 @@ Firebase web config.
   trip, trimmed text within the length limits, and a slot that is not blocked.
 - **Joining.** A participant document can be created only under an open
   hangout. Its id is the lower-cased name, so a name is unique per
-  hangout.
+  hangout. In the same batch the friend's device writes
+  `hangouts/{id}/joined/{uid}` and raises the plan's `going` count by exactly
+  one; the rules refuse a join past the limit and require `full` to follow
+  from the new count. Approving a proposal writes the proposer's `joined`
+  document too.
+- **Full plans.** Friends may read a hangout only if it is open and either
+  not full or joined by their own device, and their query must ask for
+  `open == true` and `full == false`. A device finds the full plans it is in
+  with a collection-group query on `joined` that must ask for its own uid.
+  The public marker of an open plan is `{ label: '', kind: 'open' }`: a slot
+  that holds one still takes proposals.
+- **Places.** `hangout_places/{id}` (`map_url`, `lat`, `lng`) is readable by
+  the admin and by the devices that joined the plan. A stored link must be
+  `http(s)://`, and a pin must be in range.
 - **Rate limit.** At most 20 proposals per 24-hour window across all friends;
   the window starts with the first proposal after the previous one ended.
   Each proposal must bump `counters/proposals` in the same batch, and the rules
@@ -121,7 +152,9 @@ quota; names are self-declared; a proposer who clears their browser data
 no longer sees their own private plan (they see "Ocupado" like everyone else);
 and plans approved before receipts carried the plan's details (schema 2) share
 their id with their receipt, so their receipt only ever says "approved" and
-their proposer does not see later edits. The link is meant for people you trust. Ask friends not to post
+their proposer does not see later edits. Being in a plan is tied to a
+device: on another phone, or for someone Jose added by hand, a full plan
+shows "Ocupado" (with no limit nothing changes). The link is meant for people you trust. Ask friends not to post
 exact addresses.
 
 ## Self-hosting
@@ -136,7 +169,7 @@ exact addresses.
    ```
    npm install
    npx firebase login
-   npm run deploy:rules
+   npm run deploy:firestore
    ```
 5. Publish the repository root with GitHub Pages (or any static host).
 6. Open `admin.html` and sign in with Google. The page shows your uid. In the
@@ -183,8 +216,10 @@ The end-to-end run covers admin setup, a proposal, a private approval (other
 friends see only "Ocupado"), opening it, joining, the people summary, reserving
 time privately and then opening it, the `.ics` export, edits the proposer
 follows, opening and closing a plan again, participants, reject, reconsider and
-delete, the honeypot, removing reservations, the upgrade of older data, the
-404 page and invite-code rotation. The pages run on a fixed date before the trip, so the
+delete, the honeypot, removing reservations, a plan with a limit and a place
+(pasted link, joinable look, full for the rest, map links, a short link and a
+tap on the map), the upgrade of older data, the 404 page and invite-code
+rotation. The pages run on a fixed date before the trip, so the
 result does not depend on the day it runs. For local work,
 `http://localhost:5500/?emulator` points the pages at the emulators.
 

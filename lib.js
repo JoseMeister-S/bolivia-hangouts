@@ -30,7 +30,24 @@ export function slotHours(id) {
   return slot ? (minutes(slot.end) - minutes(slot.start)) / 60 : 0;
 }
 
-export const LIMITS = { title: 80, place: 80, name: 40, note: 280 };
+export const LIMITS = { title: 80, place: 80, name: 40, note: 280, mapUrl: 500 };
+
+// ---- How many people ----
+
+// capacity is the size of the whole gathering, Jose included; null means no
+// limit. going counts everyone else who joined (the proposer too).
+export const CAPACITY = { min: 2, max: 50 };
+export const isFull = (capacity, going) => capacity != null && going + 1 >= capacity;
+// Places still free, or Infinity without a limit.
+export const spotsLeft = (capacity, going) => (capacity == null ? Infinity : Math.max(0, capacity - 1 - going));
+
+// A capacity typed into a form: a whole number in range, or null (no limit).
+export function cleanCapacity(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isInteger(n) && n >= CAPACITY.min && n <= CAPACITY.max ? n : undefined;
+}
 
 // ---- Dates ----
 
@@ -122,16 +139,19 @@ export function randomCode(length = 20) {
 // one document per taken slot, id -> { date, slot, label, kind }. Only an item
 // the host opened carries its label and kind. Anything private is
 // { label: '', kind: 'busy' }, so friends cannot tell a private plan from
-// private time. An open plan needs no marker: friends read the plan itself.
+// private time. An open plan is { label: '', kind: 'open' }: friends read the
+// plan itself while it has room, and see "Ocupado" once it is full and they
+// are not in it. A slot with an open plan still takes proposals.
 export function publicSlots(reservations, hangouts) {
   const slots = new Map();
-  const busy = (item) => ({ date: item.date, slot: item.slot, label: '', kind: 'busy' });
+  const marker = (item, kind) => ({ date: item.date, slot: item.slot, label: '', kind });
   for (const r of reservations) {
-    slots.set(slotKey(r.date, r.slot), r.open ? { date: r.date, slot: r.slot, label: r.label, kind: r.kind } : busy(r));
+    slots.set(slotKey(r.date, r.slot), r.open ? { date: r.date, slot: r.slot, label: r.label, kind: r.kind } : marker(r, 'busy'));
   }
-  for (const h of hangouts) {
+  // Private plans first: a slot that holds one is busy, whatever else is there.
+  for (const h of [...hangouts].sort((a, b) => Number(a.open) - Number(b.open))) {
     const id = slotKey(h.date, h.slot);
-    if (!h.open && !slots.has(id)) slots.set(id, busy(h));
+    if (!slots.has(id)) slots.set(id, marker(h, h.open ? 'open' : 'busy'));
   }
   return slots;
 }
@@ -142,6 +162,70 @@ export function publicDiff(current, wanted) {
   const set = [...wanted].filter(([id, want]) => !current.has(id) || !same(current.get(id), want));
   const remove = [...current.keys()].filter((id) => !wanted.has(id));
   return { set, remove };
+}
+
+// ---- Places ----
+
+// Cochabamba, where a map starts when there is no pin yet.
+export const HOME = { lat: -17.3895, lng: -66.1568, zoom: 13 };
+
+const inRange = (lat, lng) => Number.isFinite(lat) && Number.isFinite(lng)
+  && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
+const point = (lat, lng) => {
+  const p = { lat: Number(lat), lng: Number(lng) };
+  return inRange(p.lat, p.lng) ? { lat: round(p.lat), lng: round(p.lng) } : null;
+};
+// Six decimals is about 10 cm: plenty for a meeting point.
+const round = (n) => Math.round(n * 1e6) / 1e6;
+const NUM = String.raw`(-?\d{1,3}(?:\.\d+)?)`;
+const SEP = String.raw`\s*,\s*`;
+
+// Coordinates in a pasted link or text, or null. Understands Google Maps
+// (place links, ?q=, ?query=, @lat,lng), Apple Maps (ll=, q=, coordinate=),
+// OpenStreetMap (mlat/mlon, #map=), geo: links and plain "lat, lng". Short
+// share links (maps.app.goo.gl/...) carry no coordinates: null.
+export function parseLocation(text) {
+  const value = String(text ?? '').trim();
+  if (!value) return null;
+  let decoded = value;
+  try { decoded = decodeURIComponent(value.replace(/\+/g, ' ')); } catch { /* keep as is */ }
+  const patterns = [
+    String.raw`!3d${NUM}!4d${NUM}`, // Google place link: the pin itself
+    String.raw`[?&#]mlat=${NUM}&mlon=${NUM}`, // OpenStreetMap marker
+    String.raw`[?&](?:q|query|ll|sll|coordinate|destination|daddr|center)=${NUM}${SEP}${NUM}`,
+    String.raw`^geo:${NUM},${NUM}`,
+    String.raw`#map=\d+(?:\.\d+)?/${NUM}/${NUM}`, // OpenStreetMap view
+    String.raw`@${NUM},${NUM}`, // Google view center
+    String.raw`^${NUM}${SEP}${NUM}$`, // plain "lat, lng"
+  ];
+  for (const pattern of patterns) {
+    const match = decoded.match(new RegExp(pattern));
+    if (match) return point(match[1], match[2]);
+  }
+  return null;
+}
+
+// Only web links: a stored link is opened by friends, so never javascript: or data:.
+export function cleanMapUrl(value) {
+  const text = String(value ?? '').trim().slice(0, LIMITS.mapUrl);
+  return /^https?:\/\/[^\s]+$/i.test(text) ? text : '';
+}
+
+// A place as stored: { map_url, lat, lng }, from what a form holds.
+export function cleanPlace({ url, lat, lng } = {}) {
+  const pin = lat == null || lng == null ? null : point(lat, lng);
+  return { map_url: cleanMapUrl(url), lat: pin?.lat ?? null, lng: pin?.lng ?? null };
+}
+
+export const hasPlace = (place) => !!place && (place.lat != null || !!place.map_url);
+
+// Links that open the pin in the map apps people have.
+export function mapLinks({ lat, lng }, label = '') {
+  const at = `${lat},${lng}`;
+  return {
+    google: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(at)}`,
+    apple: `https://maps.apple.com/?ll=${encodeURIComponent(at)}&q=${encodeURIComponent(label || at)}`,
+  };
 }
 
 // ---- Proposals sent from this device ----
@@ -172,8 +256,9 @@ export function sentStatus(sent, receipts, openIds, today) {
     if (!approved && entry.date < today) continue;
     keep.push(entry);
     // Plans approved before receipts named the hangout share the proposal's id.
-    if (approved && openIds.has(receipt.hangout ?? p.id)) continue;
-    shown.push({ ...entry, status: approved ? 'confirmed' : 'waiting' });
+    const hangout = approved ? receipt.hangout ?? p.id : null;
+    if (approved && openIds.has(hangout)) continue;
+    shown.push({ ...entry, hangout, status: approved ? 'confirmed' : 'waiting' });
   }
   return { keep, shown };
 }
@@ -203,14 +288,14 @@ export function icsFold(line) {
   return parts.join('\r\n');
 }
 
-// hangouts: [{ id, date, slot, title, place, proposer_name, note }]
+// hangouts: [{ id, date, slot, title, place, proposer_name, note, location }]
 // reservations: [{ id, date, slot, label, kind }]; only the host's own time
 // ('personal') is exported, not travel or family blocks.
 // participants: hangout id -> [{ name }]
 export function buildIcs({ hangouts, reservations, participants, now = new Date() }) {
   const local = (date, time) => `${date.replaceAll('-', '')}T${time.replace(':', '')}00`;
   const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
-  const event = ({ id, date, slot, summary, location, description }) => {
+  const event = ({ id, date, slot, summary, location, description, pin }) => {
     const times = slotById[slot];
     if (!times) return [];
     return [
@@ -221,6 +306,7 @@ export function buildIcs({ hangouts, reservations, participants, now = new Date(
       `DTEND;TZID=America/La_Paz:${local(date, times.end)}`,
       `SUMMARY:${icsEscape(summary)}`,
       location ? `LOCATION:${icsEscape(location)}` : null,
+      pin?.lat != null ? `GEO:${pin.lat};${pin.lng}` : null,
       description ? `DESCRIPTION:${icsEscape(description)}` : null,
       'END:VEVENT',
     ];
@@ -247,7 +333,7 @@ export function buildIcs({ hangouts, reservations, participants, now = new Date(
   for (const h of hangouts) {
     const people = (participants.get(h.id) || []).map((p) => p.name);
     lines.push(...event({
-      id: h.id, date: h.date, slot: h.slot, summary: h.title, location: h.place,
+      id: h.id, date: h.date, slot: h.slot, summary: h.title, location: h.place, pin: h.location,
       description: [
         `Propuesto por ${h.proposer_name}`,
         `Vienen: ${people.length ? people.join(', ') : 'nadie todavía'}`,

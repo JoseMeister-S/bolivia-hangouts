@@ -15,8 +15,21 @@ import {
   updateDoc, deleteDoc, writeBatch, serverTimestamp, increment, Timestamp, query, where,
 } from 'firebase/firestore';
 
-// What the friends' page asks for: only hangouts the admin marked open.
-const openHangouts = (db) => query(collection(db, 'hangouts'), where('open', '==', true));
+// What the friends' page asks for: only hangouts the admin marked open, with room.
+const openHangouts = (db) => query(collection(db, 'hangouts'), where('open', '==', true), where('full', '==', false));
+
+// The page's join: the name, this device's joined document and one more in the
+// count, in one batch. Options break one part at a time.
+function join(db, uid, hangoutId, name, { going, capacity = null, key = name.toLowerCase(), joined = true, bump = 1, full } = {}) {
+  const batch = writeBatch(db);
+  batch.set(doc(db, 'hangouts', hangoutId, 'participants', key), { name, created_at: serverTimestamp() });
+  if (joined) batch.set(doc(db, 'hangouts', hangoutId, 'joined', uid), { uid, key });
+  if (bump) {
+    const after = going + bump;
+    batch.update(doc(db, 'hangouts', hangoutId), { going: after, full: full ?? (capacity != null && after + 1 >= capacity) });
+  }
+  return batch.commit();
+}
 
 const EMULATOR = !!process.env.FIRESTORE_EMULATOR_HOST;
 const results = [];
@@ -98,9 +111,16 @@ async function setup() {
       await setDoc(doc(db, 'admins', 'admin'), {});
       await setDoc(doc(db, 'blocked_slots', '2026-12-25_manana'), { date: '2026-12-25', slot: 'manana', label: 'Navidad en familia' });
       await setDoc(doc(db, 'counters', 'proposals'), { count: 0, window_start: Timestamp.now(), last_id: '' });
-      await setDoc(doc(db, 'hangouts', 'h1'), { date: '2026-12-16', slot: 'noche', title: 'Open plan', place: 'Cafe', proposer_name: 'Ana', open: true, created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h1'), { date: '2026-12-16', slot: 'noche', title: 'Open plan', place: 'Cafe', proposer_name: 'Ana', open: true, capacity: null, going: 1, full: false, created_at: Timestamp.now() });
       await setDoc(doc(db, 'hangouts', 'h1', 'participants', 'ana'), { name: 'Ana', created_at: Timestamp.now() });
-      await setDoc(doc(db, 'hangouts', 'h2'), { date: '2026-12-19', slot: 'noche', title: 'SECRET private party', place: 'Somewhere', proposer_name: 'Jose', open: false, created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h2'), { date: '2026-12-19', slot: 'noche', title: 'SECRET private party', place: 'Somewhere', proposer_name: 'Jose', open: false, capacity: null, going: 1, full: false, created_at: Timestamp.now() });
+      // Board games for 3 (Jose included): Bea is in, one place left.
+      await setDoc(doc(db, 'hangouts', 'h3'), { date: '2026-12-20', slot: 'noche', title: 'Juegos de mesa', place: 'Casa de Bea', proposer_name: 'Bea', open: true, capacity: 3, going: 1, full: false, created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h3', 'participants', 'bea'), { name: 'Bea', created_at: Timestamp.now() });
+      await setDoc(doc(db, 'hangouts', 'h3', 'joined', 'bea-device'), { uid: 'bea-device', key: 'bea' });
+      await setDoc(doc(db, 'hangout_places', 'h3'), { map_url: '', lat: -17.39, lng: -66.16 });
+      await setDoc(doc(db, 'hangout_places', 'h1'), { map_url: 'https://maps.app.goo.gl/x', lat: null, lng: null });
+      await setDoc(doc(db, 'blocked_slots', '2026-12-20_noche'), { date: '2026-12-20', slot: 'noche', label: '', kind: 'open' });
       await setDoc(doc(db, 'hangout_private', 'h1'), { note: 'SECRET note to the host', receipt: 'p-known' });
       await setDoc(doc(db, 'hangouts', 'h2', 'participants', 'eva'), { name: 'SECRET Eva', created_at: Timestamp.now() });
       await setDoc(doc(db, 'blocked_slots', '2026-12-19_noche'), { date: '2026-12-19', slot: 'noche', label: '', kind: 'busy' });
@@ -115,6 +135,7 @@ async function setup() {
       good: { db: env.authenticatedContext('good').firestore(), uid: 'good' },
       bad: { db: env.authenticatedContext('bad').firestore(), uid: 'bad' },
       stranger: { db: env.authenticatedContext('stranger').firestore(), uid: 'stranger' },
+      other: { db: env.authenticatedContext('other').firestore(), uid: 'other' },
       admin: { db: env.authenticatedContext('admin').firestore(), uid: 'admin' },
       seed,
       cleanup: () => env.cleanup(),
@@ -236,7 +257,9 @@ if (EMULATOR) {
   await denied('cannot join the seeded pending proposal', () =>
     setDoc(doc(good.db, 'hangouts', 'p1', 'participants', 'ana'), { name: 'Ana', created_at: serverTimestamp() }));
   const open = await allowed('open-hangouts query succeeds', () => getDocs(openHangouts(good.db)));
-  record(!!open && open.size === 1 && open.docs[0].id === 'h1', 'the private hangout is absent from the result');
+  record(!!open && open.docs.map((d) => d.id).sort().join() === 'h1,h3', 'the private hangout is absent from the result');
+  await denied('a query that does not ask for full == false is refused', () =>
+    getDocs(query(collection(good.db, 'hangouts'), where('open', '==', true))));
   await denied('friend cannot read the note of an open hangout', () => getDoc(doc(good.db, 'hangout_private', 'h1')));
   await denied('no code: join an open hangout', () =>
     setDoc(doc(stranger.db, 'hangouts', 'h1', 'participants', 'eve'), { name: 'Eve', created_at: serverTimestamp() }));
@@ -251,16 +274,68 @@ if (EMULATOR) {
   await allowed('friend reads who goes to an open hangout', () => getDocs(collection(good.db, 'hangouts', 'h1', 'participants')));
   const receipt = await allowed('receipt can be fetched by a known id', () => getDoc(doc(good.db, 'receipts', 'p-known')));
   record(!!receipt && receipt.data().status === 'approved', 'receipt says approved');
-  await allowed('join an approved hangout', () =>
+  const { other } = ctx;
+  await allowed('a second friend registers', () => setDoc(doc(other.db, 'members', other.uid), { code }));
+  await denied('join with the name alone (no joined document, no count)', () =>
     setDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'maría'), { name: 'María', created_at: serverTimestamp() }));
-  await denied('same name again (different case) is rejected', () =>
-    setDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'maría'), { name: 'MARÍA', created_at: serverTimestamp() }));
-  await denied('join with an empty name', () =>
-    setDoc(doc(good.db, 'hangouts', 'h1', 'participants', ''.padEnd(1, ' ')), { name: ' ', created_at: serverTimestamp() }));
-  await denied('join with a 41-char name', () =>
-    setDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'x'.repeat(41)), { name: 'x'.repeat(41), created_at: serverTimestamp() }));
-  await denied('join with an id that is not the lower-cased name', () =>
-    setDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'other'), { name: 'Pedro', created_at: serverTimestamp() }));
+  await allowed('join an approved hangout', () => join(good.db, good.uid, 'h1', 'María', { going: 1 }));
+  await denied('the same device cannot join twice', () => join(good.db, good.uid, 'h1', 'Mari', { going: 2 }));
+  await denied('same name again (different case) is rejected', () => join(other.db, other.uid, 'h1', 'MARÍA', { going: 2, key: 'maría' }));
+  await denied('join with an empty name', () => join(other.db, other.uid, 'h1', ' ', { going: 2, key: ' ' }));
+  await denied('join with a 41-char name', () => join(other.db, other.uid, 'h1', 'x'.repeat(41), { going: 2 }));
+  await denied('join with an id that is not the lower-cased name', () => join(other.db, other.uid, 'h1', 'Pedro', { going: 2, key: 'other' }));
+
+  console.log('--- Limits: a full plan is only for those in it');
+  await denied('join without bumping the count', () => join(other.db, other.uid, 'h3', 'Gus', { going: 1, capacity: 3, bump: 0 }));
+  await denied('join without a joined document', () => join(other.db, other.uid, 'h3', 'Gus', { going: 1, capacity: 3, joined: false }));
+  await denied('join counting two', () => join(other.db, other.uid, 'h3', 'Gus', { going: 1, capacity: 3, bump: 2 }));
+  await denied('join that fills the plan but leaves it marked not full', () =>
+    join(other.db, other.uid, 'h3', 'Gus', { going: 1, capacity: 3, full: false }));
+  await denied('a joined document for another device', () => {
+    const batch = writeBatch(other.db);
+    batch.set(doc(other.db, 'hangouts', 'h3', 'participants', 'gus'), { name: 'Gus', created_at: serverTimestamp() });
+    batch.set(doc(other.db, 'hangouts', 'h3', 'joined', good.uid), { uid: good.uid, key: 'gus' });
+    batch.update(doc(other.db, 'hangouts', 'h3'), { going: 2, full: true });
+    return batch.commit();
+  });
+  await denied('claim someone else\'s place in the plan (an existing name)', () => {
+    const batch = writeBatch(other.db);
+    batch.set(doc(other.db, 'hangouts', 'h3', 'joined', other.uid), { uid: other.uid, key: 'bea' });
+    batch.update(doc(other.db, 'hangouts', 'h3'), { going: 2, full: true });
+    return batch.commit();
+  });
+  await denied('the place is only for those in the plan', () => getDoc(doc(other.db, 'hangout_places', 'h3')));
+  await allowed('the last place: the plan is now full', () => join(other.db, other.uid, 'h3', 'Gus', { going: 1, capacity: 3 }));
+  await allowed('who joined still reads the full plan', () => getDoc(doc(other.db, 'hangouts', 'h3')));
+  await allowed('who joined reads who comes', () => getDocs(collection(other.db, 'hangouts', 'h3', 'participants')));
+  const place = await allowed('who joined reads the place', () => getDoc(doc(other.db, 'hangout_places', 'h3')));
+  record(!!place && place.data().lat === -17.39, 'the place has its pin');
+  const mineJoined = await allowed('a device finds the plans it joined', () =>
+    getDocs(query(collectionGroup(other.db, 'joined'), where('uid', '==', other.uid))));
+  record(!!mineJoined && mineJoined.docs.map((d) => d.ref.parent.parent.id).join() === 'h3', 'and only those');
+  await denied('a device cannot list who else joined', () => getDocs(collectionGroup(other.db, 'joined')));
+  await denied('nor find the plans of another device', () =>
+    getDocs(query(collectionGroup(other.db, 'joined'), where('uid', '==', good.uid))));
+  await denied('the full plan is hidden from the rest', () => getDoc(doc(good.db, 'hangouts', 'h3')));
+  await denied('and so is who comes', () => getDocs(collection(good.db, 'hangouts', 'h3', 'participants')));
+  await denied('and the place', () => getDoc(doc(good.db, 'hangout_places', 'h3')));
+  const withRoom = await allowed('the query for plans with room still works', () => getDocs(openHangouts(good.db)));
+  record(!!withRoom && !withRoom.docs.some((d) => d.id === 'h3'), 'the full plan is not among them');
+  await denied('nobody joins a full plan', () => join(good.db, good.uid, 'h3', 'Lalo', { going: 2, capacity: 3 }));
+  await denied('the place of a plan you did not join', () => getDoc(doc(other.db, 'hangout_places', 'h1')));
+  await allowed('the place of a plan you joined, even without a pin', () => getDoc(doc(good.db, 'hangout_places', 'h1')));
+
+  console.log('--- Proposals with a limit and a place');
+  await denied('limit of 1', () => propose(good.db, { date: '2026-12-21', capacity: 1 }));
+  await denied('limit of 51', () => propose(good.db, { date: '2026-12-21', capacity: 51 }));
+  await denied('limit that is not a whole number', () => propose(good.db, { date: '2026-12-21', capacity: 2.5 }));
+  await denied('a javascript: link as the map', () => propose(good.db, { date: '2026-12-21', map_url: 'javascript:alert(1)' }));
+  await denied('a pin out of range', () => propose(good.db, { date: '2026-12-21', lat: 100, lng: 0 }));
+  await denied('another device as the proposer', () => propose(good.db, { date: '2026-12-21', uid: other.uid }));
+  await allowed('a proposal with a limit, a link and a pin', () => propose(good.db, {
+    date: '2026-12-21', capacity: 6, uid: good.uid, map_url: 'https://maps.app.goo.gl/x', lat: -17.39, lng: -66.16,
+  }));
+  await allowed('a proposal on a slot an open plan takes', () => propose(good.db, { date: '2026-12-20', slot: 'noche' }));
   await denied('friend cannot remove a participant', () => deleteDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'maría')));
   await denied('friend cannot edit an approved hangout', () => updateDoc(doc(good.db, 'hangouts', 'h1'), { title: 'hacked' }));
 
@@ -280,7 +355,7 @@ if (EMULATOR) {
 
   await allowed('admin reads pending proposals', () => getDocs(collection(admin.db, 'proposals')));
   await allowed('admin approves (writes a hangout)', () =>
-    setDoc(doc(admin.db, 'hangouts', 'p1'), { date: '2026-12-17', slot: 'noche', title: 'Now approved', place: 'Cafe', proposer_name: 'Luis', open: false, created_at: serverTimestamp() }));
+    setDoc(doc(admin.db, 'hangouts', 'p1'), { date: '2026-12-17', slot: 'noche', title: 'Now approved', place: 'Cafe', proposer_name: 'Luis', open: false, capacity: null, going: 0, full: false, created_at: serverTimestamp() }));
   await denied('a newly approved plan is private until the admin opens it', () => getDoc(doc(good.db, 'hangouts', 'p1')));
   await allowed('admin opens the plan', () => updateDoc(doc(admin.db, 'hangouts', 'p1'), { open: true }));
   await allowed('now the friend can read it', () => getDoc(doc(good.db, 'hangouts', 'p1')));
@@ -290,6 +365,8 @@ if (EMULATOR) {
     setDoc(doc(admin.db, 'blocked_slots', '2026-12-20_tarde'), { date: '2026-12-20', slot: 'tarde', label: '', kind: 'personal' }));
   await denied('admin cannot add fields to a marker', () =>
     setDoc(doc(admin.db, 'blocked_slots', '2026-12-20_tarde'), { date: '2026-12-20', slot: 'tarde', label: '', kind: 'busy', title: 'x' }));
+  await allowed('admin publishes an open-plan marker', () =>
+    setDoc(doc(admin.db, 'blocked_slots', '2026-12-20_tarde'), { date: '2026-12-20', slot: 'tarde', label: '', kind: 'open' }));
   await allowed('admin publishes an anonymous marker', () =>
     setDoc(doc(admin.db, 'blocked_slots', '2026-12-20_tarde'), { date: '2026-12-20', slot: 'tarde', label: '', kind: 'busy' }));
   await allowed('admin publishes an open marker with its label', () =>

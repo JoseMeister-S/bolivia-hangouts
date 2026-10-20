@@ -2,26 +2,29 @@
 // hangout, tap a confirmed one to join it.
 import { signInAnonymously } from 'firebase/auth';
 import {
-  doc, collection, getDoc, getDocs, setDoc, writeBatch, query, where, serverTimestamp, increment,
+  doc, collection, collectionGroup, getDoc, getDocs, setDoc, writeBatch, query, where, serverTimestamp, increment,
 } from 'firebase/firestore/lite';
 import {
   auth, db, $, el, store, toast, friendLink, shareOnWhatsApp, wireSheet, renderTimetable, legend, participantDoc,
-  SLOTS, slotById, slotKey, LIMITS, tripDays, formatDay, todayInBolivia, clean, cleanName, nameKey,
-  countdownText, plural, freeText, reservationStatus, sentStatus,
+  placePicker, placeView, capacityInput, CAPACITY_ERROR, SLOTS, slotById, slotKey, LIMITS, tripDays, formatDay,
+  todayInBolivia, clean, cleanName, nameKey, countdownText, plural, freeText, reservationStatus, sentStatus,
+  cleanCapacity, isFull, spotsLeft,
 } from './common.js';
 
 // Everything this page keeps in the browser.
 const KEYS = { name: 'bh_name', code: 'bh_code', registered: 'bh_reg', sent: 'bh_sent', cache: 'bh_cache' };
 // Bump when the shape of the saved copy changes; an older copy is ignored.
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 const state = {
   code: null,
   name: cleanName(store.get(KEYS.name)),
   settings: null,
   blocked: new Map(),      // 'date_slot' -> { label, kind }: taken slots; label is '' unless Jose opened it
-  hangouts: new Map(),     // 'date_slot' -> [hangout], only the ones Jose marked open
+  hangouts: new Map(),     // 'date_slot' -> [hangout]: open plans with room, and the full ones this device is in
   hangoutIds: new Set(),
+  joinedIds: new Set(),    // hangouts this device joined (or proposed and got approved)
+  places: new Map(),       // hangout id -> { map_url, lat, lng }, only for those
   participants: new Map(), // hangout id -> [{ name }]
   receipts: new Map(),     // proposal id -> receipt, for proposals sent from this device
   sent: [],                // what to draw of those proposals (sentStatus), set by render()
@@ -59,6 +62,8 @@ function saveCache() {
     settings: { trip_start: state.settings.trip_start, trip_end: state.settings.trip_end },
     blocked: [...state.blocked],
     hangouts: [...state.hangouts],
+    joinedIds: [...state.joinedIds],
+    places: [...state.places],
     participants: [...state.participants],
     receipts: [...state.receipts],
   }));
@@ -72,6 +77,8 @@ function readCache() {
     state.blocked = new Map(cache.blocked);
     state.hangouts = new Map(cache.hangouts);
     state.hangoutIds = new Set([...state.hangouts.values()].flat().map((h) => h.id));
+    state.joinedIds = new Set(cache.joinedIds);
+    state.places = new Map(cache.places);
     state.participants = new Map(cache.participants);
     state.receipts = new Map(cache.receipts);
     return true;
@@ -135,21 +142,39 @@ async function start() {
 }
 
 async function load() {
-  // Friends may read only what Jose marked open. The rules refuse a hangouts
-  // query that does not ask for open == true.
-  const [settings, blocked, hangouts, receipts] = await Promise.all([
+  // Friends may read only what Jose marked open, and a full plan only if they
+  // are in it. The rules refuse a hangouts query that does not ask for both.
+  const uid = auth.currentUser.uid;
+  const [settings, blocked, hangouts, joined, receipts] = await Promise.all([
     getDoc(doc(db, 'settings', 'main')),
     getDocs(collection(db, 'blocked_slots')),
-    getDocs(query(collection(db, 'hangouts'), where('open', '==', true))),
+    getDocs(query(collection(db, 'hangouts'), where('open', '==', true), where('full', '==', false))),
+    // The plans this device joined (full ones included). If the query fails
+    // (its index is still building after a deploy) the page goes on without.
+    getDocs(query(collectionGroup(db, 'joined'), where('uid', '==', uid)))
+      .catch((error) => { console.warn(error); return { docs: [] }; }),
     // What happened to the proposals sent from this device. A receipt that
     // cannot be fetched counts as no answer yet.
     Promise.all(readSent().map((p) => getDoc(doc(db, 'receipts', p.id))
       .then((receipt) => (receipt.exists() ? [p.id, receipt.data()] : null), () => null))),
   ]);
+  const joinedIds = joined.docs.map((d) => d.ref.parent.parent.id);
   const open = hangouts.docs.map((d) => ({ id: d.id, ...d.data() }));
-  const names = await Promise.all(open.map((h) => getDocs(collection(db, 'hangouts', h.id, 'participants'))));
+  // A full plan this device is in does not come with the query: fetch it by
+  // id. A private one (its proposer's) cannot be read: its receipt tells.
+  const missing = joinedIds.filter((id) => !open.some((h) => h.id === id));
+  const extra = await Promise.all(missing.map((id) => getDoc(doc(db, 'hangouts', id)).catch(() => null)));
+  for (const d of extra) if (d?.exists()) open.push({ id: d.id, ...d.data() });
+  const [names, places] = await Promise.all([
+    Promise.all(open.map((h) => getDocs(collection(db, 'hangouts', h.id, 'participants')))),
+    // Where the joined plans happen: readable only by those in them.
+    Promise.all(joinedIds.map((id) => getDoc(doc(db, 'hangout_places', id))
+      .then((place) => (place.exists() ? [id, place.data()] : null), () => null))),
+  ]);
 
   state.settings = settings.data();
+  state.joinedIds = new Set(joinedIds);
+  state.places = new Map(places.filter(Boolean));
   state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
   state.hangouts = new Map();
   for (const h of open) {
@@ -168,13 +193,29 @@ function readSent() {
 }
 
 const people = (hangout) => state.participants.get(hangout.id) || [];
-const isMine = (hangout) => !!state.name && people(hangout).some((p) => nameKey(p.name) === nameKey(state.name));
+// In the plan: this device joined it, or (someone Jose added) the name matches.
+const isMine = (hangout) => state.joinedIds.has(hangout.id)
+  || (!!state.name && people(hangout).some((p) => nameKey(p.name) === nameKey(state.name)));
+const canJoin = (hangout) => !hangout.full && !isMine(hangout);
 
+// "Quedan 2 plazas." / "Completo." for a plan with a limit, else ''.
+function spotsText(hangout) {
+  if (hangout.capacity == null) return '';
+  if (hangout.full) return 'Completo.';
+  const spots = spotsLeft(hangout.capacity, hangout.going ?? 0);
+  return spots === 1 ? 'Queda 1 plaza.' : `Quedan ${spots} plazas.`;
+}
+
+// What is in a slot. An 'open' marker only says that an open plan is there:
+// with the plan in hand it takes nothing away; without it (a full plan this
+// device is not in) the slot is taken.
 function slotInfo(date, slotId) {
   const key = slotKey(date, slotId);
+  const hangouts = state.hangouts.get(key) || [];
+  const marker = state.blocked.get(key) || null;
   return {
-    block: state.blocked.get(key) || null,
-    hangouts: state.hangouts.get(key) || [],
+    block: marker && !(marker.kind === 'open' && hangouts.length) ? marker : null,
+    hangouts,
     mine: state.sent.filter((p) => p.date === date && p.slot === slotId),
   };
 }
@@ -194,11 +235,18 @@ function render() {
   const cellFor = (date, slotId) => {
     const { block, hangouts, mine } = slotInfo(date, slotId);
     if (hangouts.length) {
+      const [first] = hangouts;
+      // Room for one more, and this friend is not in yet: it looks inviting.
+      const joinable = date >= today && hangouts.some(canJoin);
+      const spots = spotsLeft(first.capacity ?? null, first.going ?? 0);
       return {
         status: 'plan',
-        title: hangouts[0].title,
-        sub: people(hangouts[0]).map((p) => p.name).join(', '),
+        title: first.title,
+        sub: first.full ? 'Completo'
+          : joinable && spots !== Infinity ? (spots === 1 ? 'Queda 1' : `Quedan ${spots}`)
+          : people(first).map((p) => p.name).join(', '),
         more: hangouts.length - 1,
+        joinable,
       };
     }
     const confirmed = mine.find((p) => p.status === 'confirmed');
@@ -224,7 +272,8 @@ function render() {
   ].join(' ');
 
   $('legend').replaceChildren(legend([
-    ['free', 'Libre'], ['plan', 'Plan'], ['wait', 'Tu propuesta, por confirmar'], ['off', 'Ocupado'],
+    ['free', 'Libre'], ['plan is-joinable', 'Plan abierto: te puedes apuntar'], ['plan', 'Tu plan'],
+    ['wait', 'Tu propuesta, por confirmar'], ['off', 'Ocupado'],
   ]));
 
   $('hello').replaceChildren(...(state.name
@@ -293,7 +342,8 @@ function renderSheet() {
   for (const p of confirmed) {
     body.push(el('div', { class: 'entry is-plan' },
       el('h3', {}, p.title),
-      el('p', {}, 'Jose confirmó tu plan. Solo tú y Jose lo ven.')));
+      el('p', {}, 'Jose confirmó tu plan. Solo tú y Jose lo ven.'),
+      placeView(state.places.get(p.hangout), p.title)));
   }
   if (block && !confirmed.length) {
     body.push(el('div', { class: 'entry is-' + (block.label ? reservationStatus(block.kind) : 'off') },
@@ -318,17 +368,25 @@ function renderSheet() {
 
 function renderHangout(hangout, past) {
   const names = people(hangout).map((p) => p.name);
+  const mine = isMine(hangout);
   const joinForm = el('form', { class: 'join', onsubmit: (event) => join(event, hangout) },
     nameField(),
     el('button', { type: 'submit', class: 'btn primary' }, 'Me apunto'));
+  const limit = hangout.capacity == null ? '' : `Hasta ${hangout.capacity} personas, contando a Jose. `;
   return el('div', { class: 'entry is-plan' },
     el('h3', {}, hangout.title),
     hangout.place ? el('p', {}, 'En ' + hangout.place) : null,
     el('p', {}, names.length ? 'Vienen: ' + names.join(', ') : 'Todavía no se apuntó nadie.'),
-    past ? null : isMine(hangout) ? el('p', { class: 'done' }, 'Ya estás apuntado.') : joinForm,
+    limit ? el('p', {}, limit + spotsText(hangout)) : null,
+    // The pin is only for those going.
+    mine ? placeView(state.places.get(hangout.id), hangout.title) : null,
+    past ? null : mine ? el('p', { class: 'done' }, 'Ya estás apuntado.') : hangout.full ? null : joinForm,
   );
 }
 
+// Joining is one batch: the name, this device's joined document, and one more
+// in the plan's count. The rules refuse it when the plan filled up meanwhile
+// or the name is taken.
 async function join(event, hangout) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -337,12 +395,19 @@ async function join(event, hangout) {
   button.disabled = true;
   try {
     await ready.catch(() => {});
-    await setDoc(doc(db, 'hangouts', hangout.id, 'participants', nameKey(state.name)), participantDoc(state.name));
+    const key = nameKey(state.name);
+    const uid = auth.currentUser.uid;
+    const going = (hangout.going ?? 0) + 1;
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'hangouts', hangout.id, 'participants', key), participantDoc(state.name));
+    batch.set(doc(db, 'hangouts', hangout.id, 'joined', uid), { uid, key });
+    batch.update(doc(db, 'hangouts', hangout.id), { going, full: isFull(hangout.capacity ?? null, going) });
+    await batch.commit();
     toast('Apuntado.');
   } catch (error) {
     console.error(error);
     toast(error.code === 'permission-denied'
-      ? 'Ya hay alguien apuntado con ese nombre. Cambia tu nombre y prueba otra vez.'
+      ? 'No se pudo apuntar: ya hay alguien con ese nombre, o se acaban de llenar las plazas.'
       : 'No se pudo apuntar. Revisa tu conexión y prueba otra vez.');
   }
   await load().then(saveCache, console.error);
@@ -352,14 +417,19 @@ async function join(event, hangout) {
 function proposeForm(date, slotId, another) {
   const error = el('p', { class: 'error', hidden: true });
   const send = el('button', { type: 'submit', class: 'btn primary' }, 'Enviar propuesta');
+  const picker = placePicker();
   const form = el('form', { class: 'propose' },
     el('h3', {}, another ? 'Proponer otro plan' : 'Proponer un plan'),
     nameField(),
     el('label', {}, '¿Qué hacemos?',
-      el('input', { name: 'title', maxLength: LIMITS.title, required: true, placeholder: 'Ej. Café y ponernos al día' })),
+      el('input', { name: 'title', maxLength: LIMITS.title, required: true, placeholder: 'Ej. Noche de juegos de mesa' })),
     el('label', {}, '¿Dónde?',
       el('input', { name: 'place', maxLength: LIMITS.place, placeholder: 'Ej. Zona de la Recoleta' }),
-      el('span', { class: 'hint' }, 'Un café o una zona. No pongas direcciones exactas.')),
+      el('span', { class: 'hint' }, 'Un café o una zona. Si Jose abre el plan, esto lo ven todos.')),
+    picker.node,
+    el('label', {}, '¿Cuántas personas como máximo? (opcional)',
+      capacityInput(),
+      el('span', { class: 'hint' }, 'Contando a Jose y a ti. Cuando se llena, los demás ven «Ocupado».')),
     el('label', {}, 'Nota para Jose (opcional)',
       el('textarea', { name: 'note', maxLength: LIMITS.note, rows: 2 }),
       el('span', { class: 'hint' }, 'Solo Jose ve tu propuesta y tu nota. Él decide si los demás ven el plan.')),
@@ -380,6 +450,12 @@ function proposeForm(date, slotId, another) {
       return toast('¡Enviado! Jose lo confirma pronto.');
     }
 
+    const capacity = cleanCapacity(form.elements.capacity.value);
+    if (capacity === undefined) {
+      error.textContent = CAPACITY_ERROR;
+      error.hidden = false;
+      return;
+    }
     const data = {
       date,
       slot: slotId,
@@ -389,11 +465,16 @@ function proposeForm(date, slotId, another) {
       proposer_name: state.name,
       status: 'pending',
       created_at: serverTimestamp(),
+      capacity,
+      ...picker.value(),
     };
     send.disabled = true;
     error.hidden = true;
     try {
       await ready.catch(() => {});
+      // This device joins the plan if it is approved: it keeps seeing the
+      // plan and its place once it is full.
+      if (auth.currentUser) data.uid = auth.currentUser.uid;
       const id = await sendProposal(data);
       store.set(KEYS.sent, JSON.stringify([...readSent(), { id, date, slot: slotId, title }]));
       $('sheet').close();

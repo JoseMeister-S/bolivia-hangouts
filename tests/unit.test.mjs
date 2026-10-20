@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import {
   SLOT_IDS, slotKey, slotHours, tripDays, daysBetween, weekday, dayParts, formatDay, todayInBolivia,
   countdownText, plural, freeText, clean, cleanName, nameKey, reservationStatus, randomCode,
-  publicSlots, publicDiff, sentStatus, icsFold, buildIcs,
+  publicSlots, publicDiff, sentStatus, icsFold, buildIcs, isFull, spotsLeft, cleanCapacity, parseLocation,
+  cleanMapUrl, cleanPlace, hasPlace, mapLinks,
 } from '../lib.js';
 
 test('slots: keys and hours come from the slot times', () => {
@@ -92,8 +93,10 @@ test('public projection: private items are anonymous, open ones keep their label
   ];
   const hangouts = [
     { id: 'a', date: '2026-12-18', slot: 'tarde', open: false },  // private plan
-    { id: 'b', date: '2026-12-20', slot: 'noche', open: true },   // open plan: no marker
+    { id: 'b', date: '2026-12-20', slot: 'noche', open: true },   // open plan: an anonymous 'open' marker
     { id: 'c', date: '2026-12-19', slot: 'noche', open: false },  // under an open reservation
+    { id: 'd', date: '2026-12-21', slot: 'tarde', open: true },   // open and private in one slot:
+    { id: 'e', date: '2026-12-21', slot: 'tarde', open: false },  // private wins
   ];
   const slots = publicSlots(reservations, hangouts);
   assert.deepEqual(Object.fromEntries(slots), {
@@ -101,9 +104,58 @@ test('public projection: private items are anonymous, open ones keep their label
     '2026-12-25_manana': { date: '2026-12-25', slot: 'manana', label: 'Navidad en familia', kind: 'block' },
     '2026-12-19_noche': { date: '2026-12-19', slot: 'noche', label: 'Trabajo', kind: 'personal' },
     '2026-12-18_tarde': { date: '2026-12-18', slot: 'tarde', label: '', kind: 'busy' },
+    '2026-12-20_noche': { date: '2026-12-20', slot: 'noche', label: '', kind: 'open' },
+    '2026-12-21_tarde': { date: '2026-12-21', slot: 'tarde', label: '', kind: 'busy' },
   });
   // Nothing private: no label, and one kind for private plans and private time alike.
-  for (const marker of slots.values()) assert.ok(marker.label || marker.kind === 'busy');
+  for (const marker of slots.values()) assert.ok(marker.label || ['busy', 'open'].includes(marker.kind));
+});
+
+test('limits: the host counts, and full means no more room', () => {
+  assert.equal(isFull(null, 30), false, 'no limit');
+  assert.equal(isFull(6, 4), false, 'Jose + 4 of 6');
+  assert.equal(isFull(6, 5), true, 'Jose + 5 of 6');
+  assert.equal(spotsLeft(6, 2), 3);
+  assert.equal(spotsLeft(6, 9), 0);
+  assert.equal(spotsLeft(null, 3), Infinity);
+  assert.equal(cleanCapacity(''), null);
+  assert.equal(cleanCapacity(' 6 '), 6);
+  for (const bad of ['1', '51', '2.5', 'seis']) assert.equal(cleanCapacity(bad), undefined, bad);
+});
+
+test('places: coordinates from the links people paste', () => {
+  const at = (lat, lng) => ({ lat, lng });
+  const cases = [
+    // A Google place link: the pin (!3d!4d), not the view center (@).
+    ['https://www.google.com/maps/place/Caf%C3%A9/@-17.38,-66.15,17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d-17.3812345!4d-66.1601234', at(-17.381234, -66.160123)],
+    ['https://www.google.com/maps?q=-17.39%2C-66.16', at(-17.39, -66.16)],
+    ['https://www.google.com/maps/search/?api=1&query=-17.39,-66.16', at(-17.39, -66.16)],
+    ['https://www.google.com/maps/@-17.3912,-66.1534,15z', at(-17.3912, -66.1534)],
+    ['https://maps.apple.com/?ll=-17.39,-66.16&q=Pin', at(-17.39, -66.16)],
+    ['https://maps.apple.com/?coordinate=-17.39,-66.16', at(-17.39, -66.16)],
+    ['https://www.openstreetmap.org/?mlat=-17.39&mlon=-66.16#map=17/-17.40/-66.17', at(-17.39, -66.16)],
+    ['https://www.openstreetmap.org/#map=15/-17.40/-66.17', at(-17.4, -66.17)],
+    ['geo:-17.39,-66.16', at(-17.39, -66.16)],
+    ['-17.39, -66.16', at(-17.39, -66.16)],
+  ];
+  for (const [text, expected] of cases) assert.deepEqual(parseLocation(text), expected, text);
+  for (const none of ['https://maps.app.goo.gl/AbCd123', 'Café París', '', '0,0', '91, 10', '-17.39, 181']) {
+    assert.equal(parseLocation(none), null, none);
+  }
+});
+
+test('places: only web links are kept, pins are rounded', () => {
+  assert.equal(cleanMapUrl('javascript:alert(1)'), '');
+  assert.equal(cleanMapUrl('data:text/html,x'), '');
+  assert.equal(cleanMapUrl(' https://maps.app.goo.gl/x '), 'https://maps.app.goo.gl/x');
+  assert.deepEqual(cleanPlace({ url: 'https://maps.app.goo.gl/x', lat: -17.123456789, lng: -66.1 }),
+    { map_url: 'https://maps.app.goo.gl/x', lat: -17.123457, lng: -66.1 });
+  assert.deepEqual(cleanPlace({ url: '-17.39, -66.16' }), { map_url: '', lat: null, lng: null });
+  assert.equal(hasPlace(cleanPlace({})), false);
+  assert.equal(hasPlace({ map_url: 'https://x.y', lat: null, lng: null }), true);
+  const links = mapLinks({ lat: -17.39, lng: -66.16 }, 'Juegos & café');
+  assert.equal(links.google, 'https://www.google.com/maps/search/?api=1&query=-17.39%2C-66.16');
+  assert.equal(links.apple, 'https://maps.apple.com/?ll=-17.39%2C-66.16&q=Juegos%20%26%20caf%C3%A9');
 });
 
 test('public projection: the diff writes only what changed', () => {
@@ -175,7 +227,10 @@ test('.ics: lines are folded at 75 octets and unfold to the original', () => {
 
 test('.ics: events, escaping, time zone; only own time from reservations', () => {
   const ics = buildIcs({
-    hangouts: [{ id: 'h1', date: '2026-12-18', slot: 'manana', title: 'Café; luego, cine', place: 'Zona norte', proposer_name: 'Caro', note: 'línea 1\nlínea 2' }],
+    hangouts: [{
+      id: 'h1', date: '2026-12-18', slot: 'manana', title: 'Café; luego, cine', place: 'Zona norte', proposer_name: 'Caro',
+      note: 'línea 1\nlínea 2', location: { map_url: '', lat: -17.39, lng: -66.16 },
+    }],
     reservations: [
       { id: '2026-12-15_manana', date: '2026-12-15', slot: 'manana', label: 'Gimnasio', kind: 'personal' },
       { id: '2026-12-25_manana', date: '2026-12-25', slot: 'manana', label: 'Navidad', kind: 'block' },
@@ -192,6 +247,7 @@ test('.ics: events, escaping, time zone; only own time from reservations', () =>
   assert.ok(text.includes('DTEND;TZID=America/La_Paz:20261218T123000'));
   assert.ok(text.includes('SUMMARY:Café\\; luego\\, cine'));
   assert.ok(text.includes('LOCATION:Zona norte'));
+  assert.ok(text.includes('GEO:-17.39;-66.16'));
   assert.ok(text.includes('Vienen: Caro\\, Luis\\nNota: línea 1\\nlínea 2'));
   assert.ok(text.includes('SUMMARY:Gimnasio'));
   assert.ok(!text.includes('Navidad'), 'family blocks are not exported');
