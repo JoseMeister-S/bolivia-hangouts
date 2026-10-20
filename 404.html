@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <script>
+    // GitHub Pages answers every missing address with this page, at any depth
+    // (/bolivia-hangouts/a/b/c). Relative links must start at the site's root:
+    // the first path segment on a project site (*.github.io), '/' elsewhere.
+    (function () {
+      var first = location.pathname.split('/')[1];
+      var base = document.createElement('base');
+      base.href = /\.github\.io$/.test(location.hostname) && first ? '/' + first + '/' : '/';
+      document.head.appendChild(base);
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light dark">
+  <title>Página no encontrada · Jose en Cochabamba</title>
+  <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Página no encontrada</h1>
+    <p class="lede">Esta dirección no existe. Puede que al enlace le falte un trozo.</p>
+  </header>
+
+  <main>
+    <section class="lost">
+      <span data-critter></span>
+      <script src="critters.js"></script>
+      <p id="countdown">Te llevamos <span id="where">al calendario</span> en <strong id="seconds">10</strong> segundos.</p>
+      <div class="actions">
+        <a class="btn primary" id="go" href="./">Ir al calendario</a>
+        <button type="button" class="btn text" id="stay">Quedarme aquí</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">Error 404.</footer>
+
+  <script>
+    // Send people on after a few seconds: to the panel when the address
+    // mentions it, otherwise to the calendar. The query string goes along, so
+    // the invite code (?c=...) still works.
+    (function () {
+      var SECONDS = 10;
+      var admin = /admin/i.test(location.pathname);
+      var target = new URL((admin ? 'admin.html' : './') + location.search, document.baseURI).href;
+      var go = document.getElementById('go');
+      go.href = target;
+      if (admin) {
+        go.textContent = 'Ir al panel';
+        document.getElementById('where').textContent = 'al panel';
+      }
+
+      var left = SECONDS;
+      var timer = setInterval(function () {
+        left -= 1;
+        document.getElementById('seconds').textContent = left;
+        if (left <= 0) {
+          clearInterval(timer);
+          location.replace(target);
+        }
+      }, 1000);
+
+      document.getElementById('stay').addEventListener('click', function () {
+        clearInterval(timer);
+        document.getElementById('countdown').textContent = 'Te quedas aquí. Usa el botón cuando quieras volver.';
+        this.hidden = true;
+      });
+    })();
+  </script>
+</body>
+</html>

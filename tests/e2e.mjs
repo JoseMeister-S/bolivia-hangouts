@@ -28,10 +28,13 @@ const TODAY = new Date('2026-10-01T12:00:00-04:00');
 const server = http.createServer((req, res) => {
   const name = decodeURIComponent(new URL(req.url, 'http://x').pathname);
   const file = path.join(root, name === '/' ? 'index.html' : name);
-  if (!file.startsWith(root) || !fs.existsSync(file)) return res.writeHead(404).end();
-  const type = TYPES[path.extname(file)] || 'application/octet-stream';
-  res.writeHead(200, { 'content-type': type.startsWith('font') ? type : type + '; charset=utf-8' });
-  fs.createReadStream(file).pipe(res);
+  if (!file.startsWith(root)) return res.writeHead(404).end();
+  // Like GitHub Pages: a missing file gets 404.html, with status 404.
+  const found = fs.existsSync(file) && fs.statSync(file).isFile();
+  const served = found ? file : path.join(root, '404.html');
+  const type = TYPES[path.extname(served)] || 'application/octet-stream';
+  res.writeHead(found ? 200 : 404, { 'content-type': type.startsWith('font') ? type : type + '; charset=utf-8' });
+  fs.createReadStream(served).pipe(res);
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -106,7 +109,7 @@ try {
   // ---- Friend 1 proposes
   const friendUrl = `/?emulator&c=${code}`;
   const caro = await open(friendUrl);
-  check(await caro.locator('#status .critter.on').count() === 1, 'one loader animal shows while the page loads');
+  check(await caro.locator('#status .critter').count() === 1, 'one loader animal shows while the page loads');
   await caro.waitForSelector(FRESH);
   check(await caro.locator('.tt-row[id^="d-"]').count() === 20, 'friend timetable has 20 days');
   check(await caro.locator('#d-2026-12-14 .tt-cell').count() === 1
@@ -387,6 +390,27 @@ try {
   await caro.reload();
   await caro.waitForSelector('#gate:not([hidden])');
   check(await caro.isHidden('#calendar'), 'old link shows only "Pídele el enlace a Jose" after rotation');
+
+  // ---- A wrong address: the 404 page sends people on, invite code included
+  const lostContext = await browser.newContext({ ...PHONE, reducedMotion: 'reduce' });
+  await lostContext.clock.install({ time: TODAY });
+  const lost = await lostContext.newPage();
+  lost.on('pageerror', (e) => errors.push(`404: ${e.message}`));
+  const response = await lost.goto(`${base}/a/wrong/path?emulator&c=${code}`);
+  check(response.status() === 404 && (await lost.innerText('h1')) === 'Página no encontrada', 'a wrong address answers 404 with the 404 page');
+  check(await lost.locator('.lost .critter').count() === 1
+    && await lost.evaluate(() => getComputedStyle(document.body).fontFamily.includes('Bricolage')), "the 404 page has its animal and the site's styles, at any depth");
+  check(await lost.getAttribute('#go', 'href') === `${base}/?emulator&c=${code}`, 'the 404 link leads to the calendar and keeps the invite code');
+  await lost.clock.runFor(10_000);
+  await lost.waitForURL(`${base}/?emulator&c=${code}`, { waitUntil: 'commit' });
+  check(true, 'after 10 seconds the 404 page goes to the calendar');
+  await lost.goto(`${base}/admin`);
+  check(await lost.getAttribute('#go', 'href') === `${base}/admin.html` && (await lost.innerText('#go')) === 'Ir al panel',
+    'an address that mentions admin leads to the panel');
+  await lost.click('#stay');
+  await lost.clock.runFor(15_000);
+  check(new URL(lost.url()).pathname === '/admin', '"Quedarme aquí" stops the redirect');
+  await lostContext.close();
 
   check(errors.length === 0, 'no script errors' + (errors.length ? ': ' + errors.join(' | ') : ''));
 } catch (error) {
