@@ -13,6 +13,7 @@
     "test:e2e": "firebase emulators:exec --only firestore,auth --project demo-bolivia-hangouts \"node tests/e2e.mjs\"",
     "test:e2e:java17": "npx --yes firebase-tools@13.35.1 emulators:exec --only firestore,auth --project demo-bolivia-hangouts \"node tests/e2e.mjs\"",
     "test:live": "node tests/security.mjs",
+    "images": "node tools/images.mjs",
     "deploy:firestore": "firebase deploy --only firestore:rules,firestore:indexes"
   },
   "devDependencies": {

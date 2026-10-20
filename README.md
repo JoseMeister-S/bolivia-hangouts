@@ -55,6 +55,15 @@ self-hosted in `fonts/`, no request to a font service): condensed in the
 timetable cells and the title, regular width for reading. Light and dark follow
 the system setting.
 
+The tab icon is the owl on a slate tile (`images/favicon.svg`, with PNG
+copies for older browsers and the iPhone home screen). A shared link shows a
+preview card (`images/social-card.png`, 1200x630) through Open Graph tags in
+`index.html`: the title, the dates, a slice of the timetable and the three animals,
+nothing from the calendar itself. The card is drawn from
+`tools/social-card.html` with the site's own stylesheet; after changing it or
+the icon, run `npm run images` (needs `playwright-core`). WhatsApp keeps its
+own copy of a preview for a while, so a changed card can take time to show.
+
 ## Loading
 
 - The pages use Firestore Lite: plain HTTPS requests, no streaming channel.
@@ -179,6 +188,11 @@ exact addresses.
    rate-limit counter and the initial blocked slots (edit `TRIP` and
    `SEED_BLOCKS` in [`admin.js`](admin.js) first for your own trip).
 8. Copy the friends' link from the admin page and send it.
+
+For your own trip, also change the dates and names in
+`tools/social-card.html` and in the `og:` tags of `index.html` (the
+`og:image` address must be your site's full address), then run
+`npm run images`.
 
 To run the pages locally: `npm run serve`, then open `http://localhost:5500`.
 
