@@ -71,6 +71,12 @@ const reloaded = async (page, selector = FRESH) => { await page.reload(); await 
 const pageText = (page) => page.evaluate(() => document.body.textContent);
 const savedCopy = (page) => page.evaluate(() => localStorage.getItem('bh_cache') || '');
 const toastIs = (page, start) => page.waitForFunction((text) => document.getElementById('toast')?.textContent.startsWith(text), start);
+// Every icon the page links to answers 200 (from wherever the page sits).
+async function iconsLoad(page) {
+  const links = await page.evaluate(() => [...document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"]')].map((l) => l.href));
+  const statuses = await Promise.all(links.map((href) => fetch(href).then((r) => r.status)));
+  return links.length === 3 && statuses.every((status) => status === 200);
+}
 const inSheet = (page, name) => page.locator('#sheet-body').getByRole('button', { name, exact: true });
 // The emulator's REST API with owner access (no rules): reads, or writes when given fields.
 const rest = async (docPath, method = 'GET', fields) => (await fetch(
@@ -112,6 +118,9 @@ try {
   const friendUrl = `/?emulator&c=${code}`;
   const caro = await open(friendUrl);
   check(await caro.locator('#status .critter').count() === 1, 'one loader animal shows while the page loads');
+  check(await iconsLoad(caro), 'the page icons load');
+  check((await caro.getAttribute('meta[property="og:image"]', 'content')).endsWith('/images/social-card.png')
+    && fs.existsSync(path.join(root, 'images', 'social-card.png')), 'the link preview points at the card image');
   await caro.waitForSelector(FRESH);
   check(await caro.locator('.tt-row[id^="d-"]').count() === 20, 'friend timetable has 20 days');
   check(await caro.locator('#d-2026-12-14 .tt-cell').count() === 1
@@ -494,6 +503,7 @@ try {
   check(response.status() === 404 && (await lost.innerText('h1')) === 'Página no encontrada', 'a wrong address answers 404 with the 404 page');
   check(await lost.locator('.lost .critter').count() === 1
     && await lost.evaluate(() => getComputedStyle(document.body).fontFamily.includes('Bricolage')), "the 404 page has its animal and the site's styles, at any depth");
+  check(await iconsLoad(lost), 'the 404 page icons load at any depth');
   check(await lost.getAttribute('#go', 'href') === `${base}/?emulator&c=${code}`, 'the 404 link leads to the calendar and keeps the invite code');
   await lost.clock.runFor(10_000);
   await lost.waitForURL(`${base}/?emulator&c=${code}`, { waitUntil: 'commit' });

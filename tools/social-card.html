@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- The link preview image (images/social-card.png, 1200x630) that WhatsApp,
+     Instagram and others show when the friends' link is shared. It uses the
+     site's own stylesheet, font and owl. Regenerate with: npm run images -->
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="../app.css">
+  <style>
+    html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+    body { background: var(--alabaster); color: var(--obsidian); }
+    .card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 64px; height: 100%; padding: 70px 76px 64px; box-sizing: border-box; }
+    .words { display: flex; flex-direction: column; }
+    .kicker { margin: 0 0 22px; font-size: 30px; font-weight: 600; letter-spacing: .02em; color: var(--slate); }
+    h1 { margin: 0; font-size: 128px; font-weight: 800; font-stretch: 75%; line-height: .84; letter-spacing: -.02em; }
+    .dates { margin: 34px 0 0; font-size: 44px; font-weight: 700; line-height: 1.1; }
+    .ask { margin: 12px 0 0; font-size: 34px; font-weight: 500; line-height: 1.2; color: color-mix(in srgb, var(--obsidian) 72%, var(--alabaster)); }
+
+    /* A slice of the timetable: the same blocks and colors as the page. */
+    .grid { align-self: start; margin-top: 52px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .grid i { height: 62px; border-radius: 6px; }
+    .grid .plan { background: var(--mahogany); }
+    .grid .own { background: var(--slate); }
+    .grid .off { background: var(--pewter); }
+    .grid .wait {
+      background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--bronze) 34%, transparent) 0 9px, transparent 9px 18px);
+      box-shadow: inset 0 0 0 3px var(--bronze);
+    }
+    .grid .free { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--obsidian) 24%, var(--alabaster)); }
+    .grid .join { background: color-mix(in srgb, var(--mahogany) 18%, var(--alabaster)); box-shadow: inset 0 0 0 3px var(--mahogany); }
+    .owl { position: absolute; z-index: 1; right: 172px; bottom: -4px; }
+    .owl .critter { width: 168px; height: 168px; }
+    .owl .critter * { stroke: var(--obsidian); }
+    .band { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; display: flex; }
+    .band i { flex: 1; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="words">
+      <p class="kicker">Calendario compartido</p>
+      <h1>Jose en Cochabamba</h1>
+      <p class="dates">14 de diciembre al 2 de enero</p>
+      <p class="ask">Propón un plan o apúntate a uno.</p>
+    </div>
+    <div class="grid" aria-hidden="true">
+      <i class="off"></i><i class="off"></i><i class="off"></i><i class="off"></i>
+      <i class="own"></i><i class="plan"></i><i class="free"></i><i class="wait"></i>
+      <i class="free"></i><i class="join"></i><i class="plan"></i><i class="free"></i>
+      <i class="own"></i><i class="free"></i><i class="free"></i><i></i>
+    </div>
+  </div>
+  <div class="owl"><span data-critter="owl"></span></div>
+  <div class="band" aria-hidden="true">
+    <i style="background: var(--mahogany)"></i><i style="background: var(--slate)"></i><i style="background: var(--pewter)"></i>
+    <i style="background: var(--bronze)"></i><i style="background: var(--obsidian)"></i>
+  </div>
+  <script src="../critters.js"></script>
+</body>
+</html>
