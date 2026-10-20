@@ -4,7 +4,7 @@
 //
 // "first visit" is a fresh browser profile (new anonymous sign-in, nothing
 // cached); "return visit" reloads in the same profile. Read-only.
-import { chromium } from 'playwright-core';
+import { launch, PHONE, FRESH } from './browser.mjs';
 
 const base = (process.argv[2] || 'http://localhost:5500').replace(/\/$/, '');
 const code = process.env.INVITE_CODE;
@@ -13,13 +13,12 @@ const RUNS = 3;
 const url = `${base}/?c=${encodeURIComponent(code)}`;
 const median = (list) => [...list].sort((a, b) => a - b)[Math.floor(list.length / 2)];
 
-const browser = await chromium.launch({ channel: process.env.BROWSER_CHANNEL || 'msedge' });
-const FRESH = '#calendar[aria-busy="false"]';
+const browser = await launch();
 const first = [];
 const shown = [];
 const again = [];
 for (let i = 0; i < RUNS; i++) {
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await browser.newContext(PHONE);
   const page = await context.newPage();
   let t = Date.now();
   await page.goto(url, { waitUntil: 'commit' });

@@ -1,10 +1,13 @@
-// Shared by index.html and admin.html: Firebase setup, slot definitions and
-// small DOM/date helpers. All dates are plain 'YYYY-MM-DD' strings in Bolivia
-// time; nothing here depends on the visitor's time zone.
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
-import { getAuth, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
-import { getFirestore, connectFirestoreEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js';
+// Shared by index.html and admin.html: Firebase setup and the DOM helpers.
+// The pure helpers (slots, dates, text) live in lib.js and are re-exported
+// here, so a page imports everything it needs from one place.
+import { initializeApp } from 'firebase/app';
+import { getAuth, connectAuthEmulator } from 'firebase/auth';
+import { getFirestore, connectFirestoreEmulator, serverTimestamp } from 'firebase/firestore/lite';
 import { firebaseConfig } from './config.js';
+import { SLOTS, formatDay, dayParts, weekday } from './lib.js';
+
+export * from './lib.js';
 
 // Local development only: http://localhost:5500/?emulator talks to the Firebase
 // emulators (npm run test:e2e) instead of the live project.
@@ -22,39 +25,12 @@ if (useEmulator) {
   connectFirestoreEmulator(db, '127.0.0.1', 8080);
 }
 
-// Default times are Bolivia time (America/La_Paz, UTC-4, no DST).
-export const SLOTS = [
-  { id: 'manana', label: 'Mañana', start: '10:00', end: '12:30' },
-  { id: 'almuerzo', label: 'Almuerzo', start: '12:30', end: '15:00' },
-  { id: 'tarde', label: 'Tarde', start: '15:30', end: '19:00' },
-  { id: 'noche', label: 'Noche', start: '20:00', end: '23:30' },
-];
-export const slotById = Object.fromEntries(SLOTS.map((s) => [s.id, s]));
-export const slotIndex = (id) => SLOTS.findIndex((s) => s.id === id);
+// A participant document; its id is the lower-cased name (see firestore.rules).
+export const participantDoc = (name) => ({ name, created_at: serverTimestamp() });
 
-export const LIMITS = { title: 80, place: 80, name: 40, note: 280 };
+// ---- DOM ----
 
-// Every 'YYYY-MM-DD' from start to end, inclusive.
-export function tripDays(start, end) {
-  const days = [];
-  const d = new Date(start + 'T00:00:00Z');
-  const last = new Date(end + 'T00:00:00Z');
-  while (d <= last) {
-    days.push(d.toISOString().slice(0, 10));
-    d.setUTCDate(d.getUTCDate() + 1);
-  }
-  return days;
-}
-
-const dayFormat = new Intl.DateTimeFormat('es-BO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'UTC' });
-const shortFormat = new Intl.DateTimeFormat('es-BO', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
-export const formatDay = (iso) => dayFormat.format(new Date(iso + 'T00:00:00Z'));
-export const formatDayShort = (iso) => shortFormat.format(new Date(iso + 'T00:00:00Z'));
-
-// Today's date in Bolivia, whatever the visitor's own time zone is.
-export function todayInBolivia() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/La_Paz' }).format(new Date());
-}
+export const $ = (id) => document.getElementById(id);
 
 // Tiny element builder. Text always goes through textContent/text nodes, so
 // user-provided strings are never parsed as HTML.
@@ -75,18 +51,6 @@ export function el(tag, props = {}, ...children) {
   return node;
 }
 
-// Trim, collapse inner whitespace and cut to the maximum length.
-export function clean(value, max) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max).trim();
-}
-
-// Names double as document ids (lower-cased), so they cannot contain '/'.
-export function cleanName(value) {
-  return clean(String(value ?? '').replace(/\//g, ' '), LIMITS.name);
-}
-
-export const nameKey = (name) => name.toLowerCase();
-
 export const store = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
   set(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode */ } },
@@ -99,13 +63,13 @@ export function friendLink(code) {
   return url.href.replace('/index.html?', '/?');
 }
 
-export function whatsappUrl(text) {
-  return 'https://wa.me/?text=' + encodeURIComponent(text);
+export function shareOnWhatsApp(text) {
+  window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank', 'noopener');
 }
 
 let toastTimer;
 export function toast(message) {
-  let node = document.getElementById('toast');
+  let node = $('toast');
   if (!node) {
     node = el('div', { id: 'toast', role: 'status' });
     document.body.append(node);
@@ -116,31 +80,15 @@ export function toast(message) {
   toastTimer = setTimeout(() => node.classList.remove('show'), 3500);
 }
 
-// ---- Trip helpers shared by both pages ----
-
-export const SLOT_HOURS = { manana: 2.5, almuerzo: 2.5, tarde: 3.5, noche: 3.5 };
-
-const DAY_MS = 24 * 3600 * 1000;
-export const daysBetween = (from, to) =>
-  Math.round((new Date(to + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / DAY_MS);
-
-const partsFormat = new Intl.DateTimeFormat('es-BO', { weekday: 'short', month: 'short', timeZone: 'UTC' });
-const monthFormat = new Intl.DateTimeFormat('es-BO', { month: 'long', timeZone: 'UTC' });
-// { weekday: 'lun', day: 14, month: 'dic', monthLong: 'diciembre' }
-export function dayParts(iso) {
-  const date = new Date(iso + 'T00:00:00Z');
-  const parts = Object.fromEntries(partsFormat.formatToParts(date).map((p) => [p.type, p.value.replace('.', '')]));
-  return { weekday: parts.weekday, day: date.getUTCDate(), month: parts.month, monthLong: monthFormat.format(date) };
+// The slot sheet: its close button and a click on the backdrop (outside the
+// sheet's box) close it.
+export function wireSheet() {
+  const sheet = $('sheet');
+  $('sheet-close').addEventListener('click', () => sheet.close());
+  sheet.addEventListener('click', (event) => { if (event.target === sheet) sheet.close(); });
 }
 
-export function countdownText(start, end, today) {
-  if (today < start) {
-    const left = daysBetween(today, start);
-    return left === 1 ? 'Falta 1 día' : `Faltan ${left} días`;
-  }
-  if (today > end) return 'Hasta la próxima';
-  return `Día ${daysBetween(start, today) + 1} de ${daysBetween(start, end) + 1}`;
-}
+// ---- Timetable ----
 
 // The trip as a timetable, one week (at most 7 days) on screen at a time:
 // a row per day, a column per slot, every cell filled with what is in it.
@@ -156,8 +104,7 @@ export function renderTimetable({ days, today, cellFor, onPick }) {
   // Weeks run Monday to Sunday.
   const weeks = [];
   for (const date of days) {
-    const monday = new Date(date + 'T00:00:00Z').getUTCDay() === 1;
-    if (!weeks.length || monday) weeks.push([]);
+    if (!weeks.length || weekday(date) === 1) weeks.push([]);
     weeks.at(-1).push(date);
   }
   if (shownWeek === null) shownWeek = Math.max(0, weeks.findIndex((week) => week.includes(today)));
@@ -234,5 +181,3 @@ export function legend(items) {
   return el('ul', { class: 'legend' }, items.map(([status, label]) =>
     el('li', {}, el('i', { class: 'swatch is-' + status }), label)));
 }
-
-export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;

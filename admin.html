@@ -8,6 +8,16 @@
   <title>Panel de Jose</title>
   <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="app.css">
+  <!-- The Firebase version lives here and in the preloads below (on both pages). -->
+  <script type="importmap">
+    {
+      "imports": {
+        "firebase/app": "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js",
+        "firebase/firestore/lite": "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js"
+      }
+    }
+  </script>
   <!-- Fetch the scripts in parallel instead of one after the other. -->
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
   <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
@@ -17,6 +27,7 @@
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js">
   <link rel="modulepreload" href="config.js">
   <link rel="modulepreload" href="common.js">
+  <link rel="modulepreload" href="lib.js">
   <link rel="modulepreload" href="admin.js">
 </head>
 <body class="admin">
@@ -138,7 +149,7 @@
       <section>
         <h2>Mi tiempo y bloqueos</h2>
         <p class="hint">Para reservar, toca un espacio del calendario.</p>
-        <div id="blocked"></div>
+        <div id="reservations"></div>
       </section>
 
       <section>
@@ -181,10 +192,10 @@
       <h2>Editar</h2>
       <label>Día <select name="date" required></select></label>
       <label>Momento <select name="slot" required></select></label>
-      <label>Plan <input name="title" maxlength="80" required></label>
-      <label>Lugar <input name="place" maxlength="80"></label>
-      <label>Lo propuso <input name="proposer_name" maxlength="40" required></label>
-      <label>Nota <textarea name="note" maxlength="280" rows="2"></textarea></label>
+      <label>Plan <input name="title" required></label>
+      <label>Lugar <input name="place"></label>
+      <label>Lo propuso <input name="proposer_name" required></label>
+      <label>Nota <textarea name="note" rows="2"></textarea></label>
       <div class="actions">
         <button type="submit" class="btn primary">Guardar cambios</button>
         <button type="button" class="btn text" id="edit-cancel">Cancelar</button>

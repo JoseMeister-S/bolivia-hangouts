@@ -8,6 +8,16 @@
   <title>Jose en Cochabamba</title>
   <link rel="preload" href="fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="app.css">
+  <!-- The Firebase version lives here and in the preloads below (on both pages). -->
+  <script type="importmap">
+    {
+      "imports": {
+        "firebase/app": "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js",
+        "firebase/firestore/lite": "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js"
+      }
+    }
+  </script>
   <!-- Fetch the scripts in parallel instead of one after the other. -->
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
   <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
@@ -17,6 +27,7 @@
   <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js">
   <link rel="modulepreload" href="config.js">
   <link rel="modulepreload" href="common.js">
+  <link rel="modulepreload" href="lib.js">
   <link rel="modulepreload" href="index.js">
 </head>
 <body>

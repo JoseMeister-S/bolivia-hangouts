@@ -9,7 +9,10 @@ doing or with whom.
 Built for a trip to Cochabamba, Bolivia (14 Dec 2026 – 2 Jan 2027). The UI is in
 Spanish. The code is generic enough to reuse for your own trip.
 
-- Static HTML/CSS/vanilla JavaScript. No build step, no framework.
+- Static HTML/CSS/vanilla JavaScript. No build step, no framework. `lib.js`
+  holds the pure logic (dates, text, what friends may see, the `.ics` file),
+  `common.js` the Firebase setup and DOM helpers, `index.js` and `admin.js`
+  the two pages.
 - Hosted on GitHub Pages (any static host works).
 - Firebase on the free Spark plan: Firestore, Security Rules, and Auth.
 
@@ -38,7 +41,13 @@ the system setting.
 ## Loading
 
 - The pages use Firestore Lite: plain HTTPS requests, no streaming channel.
-  With the full SDK the first load took several seconds longer.
+  With the full SDK the first load took several seconds longer. An import map
+  in each page maps `firebase/app`, `firebase/auth` and
+  `firebase/firestore/lite` to the CDN, so the Firebase version is written
+  only in the two HTML files.
+- The friends' page asks for the settings, the taken slots, the open plans and
+  its own receipts at the same time; only the names of who is coming wait for
+  the open plans.
 - The friends' page keeps the last timetable it loaded in the browser and
   shows it at once on the next visit, then replaces it with fresh data. The
   copy holds only what that friend was allowed to read.
@@ -60,30 +69,40 @@ Firebase web config.
   rotating the code locks out every old link at once.
 - **Pending is invisible.** Proposals go to the `proposals` collection. Friends
   can create documents there but can never read them, not even their own.
-  Approving a proposal means the admin copies it into `hangouts`. There is no
-  status field a client could flip.
+  Approving a proposal means the admin copies it into `hangouts`, under a new
+  id. There is no status field a client could flip.
+- **The note stays with the host.** A friend who may read a hangout reads all
+  of its fields, so a hangout never holds the note to the host. The note lives
+  in `hangout_private`, which only the admin can read; the rules refuse a
+  hangout with a `note` field.
 - **Private unless opened.** Every hangout has an `open` flag, false by
   default. The rules let a friend read a hangout, and the names of who is
   coming, only when `open == true`; a query that does not ask for
   `open == true` is refused outright. The host's own reservations (gym, work)
   live in `reservations`, which only the admin can read.
 - **What friends get instead.** `blocked_slots` is a public projection with one
-  document per taken slot. It carries a label only for items the host opened;
-  otherwise the label is empty and the page shows "Ocupado". The admin page
-  rebuilds this projection from the private data after every change. A taken
-  slot also refuses new proposals.
-- **Receipts.** `receipts/{proposalId}` holds "approved" or "rejected". It can
-  be fetched only by id, and only the device that sent the proposal knows the
-  id. That is how a proposer sees their own plan as confirmed while everyone
-  else sees "Ocupado". The proposal's text for that view comes from the
-  proposer's own browser storage, not from the server.
+  document per taken slot. It carries a label and a kind only for items the
+  host opened; anything private is `{ label: '', kind: 'busy' }`, so a friend
+  cannot tell a private plan from private time, and the page shows "Ocupado".
+  The rules refuse any other shape. The admin page writes the projection in
+  the same batch as each change, so it never disagrees with the private data,
+  and repairs it on every load. A taken slot also refuses new proposals.
+- **Receipts.** `receipts/{proposalId}` holds the answer ("pending" after an
+  edit, "approved" or "rejected") and the plan's current date, slot and title,
+  so the proposer follows the host's edits. It can be fetched only by id, and
+  only the device that sent the proposal knows the id: an approved hangout
+  gets a new id, so the ids friends see on open plans never open a receipt.
+  That is how a proposer sees their own plan as confirmed while everyone else
+  sees "Ocupado". The device keeps its proposals until they are rejected, or
+  until their day passes without an answer.
 - **Validated writes.** A proposal must have exactly the expected fields,
   `status == 'pending'`, a server timestamp, a valid slot, a date inside the
   trip, trimmed text within the length limits, and a slot that is not blocked.
 - **Joining.** A participant document can be created only under an open
   hangout. Its id is the lower-cased name, so a name is unique per
   hangout.
-- **Rate limit.** At most 20 proposals per rolling 24 hours across all friends.
+- **Rate limit.** At most 20 proposals per 24-hour window across all friends;
+  the window starts with the first proposal after the previous one ended.
   Each proposal must bump `counters/proposals` in the same batch, and the rules
   tie the bump to that proposal's id. The form also has a hidden honeypot field.
 - **Admin.** A signed-in user whose uid is a document id in `admins`. No client
@@ -92,8 +111,11 @@ Firebase web config.
 
 Known limits: the honeypot is client-side only; anyone who has the link can
 see which slots are taken, read the open plans, and use up the daily proposal
-quota; names are self-declared; and a proposer who clears their browser data
-no longer sees their own private plan (they see "Ocupado" like everyone else). The link is meant for people you trust. Ask friends not to post
+quota; names are self-declared; a proposer who clears their browser data
+no longer sees their own private plan (they see "Ocupado" like everyone else);
+and plans approved before receipts carried the plan's details (schema 2) share
+their id with their receipt, so their receipt only ever says "approved" and
+their proposer does not see later edits. The link is meant for people you trust. Ask friends not to post
 exact addresses.
 
 ## Self-hosting
@@ -124,6 +146,7 @@ To run the pages locally: `npm run serve`, then open `http://localhost:5500`.
 ## Tests
 
 ```
+npm test                                # unit tests of lib.js (no emulator, no browser)
 npm run test:rules                      # full rules suite in the Firestore emulator
 INVITE_CODE=xxx npm run test:live       # same checks against the live project
 ```
@@ -136,7 +159,10 @@ participants and reservation labels cannot be read. It leaves one pending
 `[TEST]` proposal for you to delete.
 
 The emulator needs Java 21 or newer with current `firebase-tools`; with Java
-11–17 use `npm run test:rules:java17` and `npm run test:e2e:java17`.
+11–17 use `npm run test:rules:java17` and `npm run test:e2e:java17`. On
+Windows the older `firebase-tools` can leave the Firestore emulator running
+after a run (the next one fails with "port taken"); end the `java` process
+that listens on port 8080.
 
 Browser tests use `playwright-core` with the Edge or Chrome already on your
 machine (`npm i --no-save playwright-core`):
@@ -149,8 +175,12 @@ INVITE_CODE=xxx node tests/timing.mjs https://your.site   # time to timetable
 
 The end-to-end run covers admin setup, a proposal, a private approval (other
 friends see only "Ocupado"), opening it, joining, the people summary, reserving
-time privately and then opening it, the `.ics` export and invite-code rotation. For
-local work, `http://localhost:5500/?emulator` points the pages at the emulators.
+time privately and then opening it, the `.ics` export, edits the proposer
+follows, opening and closing a plan again, participants, reject, reconsider and
+delete, the honeypot, removing reservations, the upgrade of older data and
+invite-code rotation. The pages run on a fixed date before the trip, so the
+result does not depend on the day it runs. For local work,
+`http://localhost:5500/?emulator` points the pages at the emulators.
 
 ## License
 

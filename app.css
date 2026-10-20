@@ -80,7 +80,7 @@ p { margin: 0 0 .75rem; max-width: 62ch; }
 
 .intro, #panel > .summary { margin-top: 1.5rem; }
 .summary { font-weight: 700; }
-.status, .empty, .hint, .foot { color: var(--soft); }
+.empty, .hint, .foot { color: var(--soft); }
 .hint { display: block; font-size: .875rem; font-weight: 400; }
 .note { font-style: italic; overflow-wrap: anywhere; }
 .error { font-weight: 600; }
@@ -226,10 +226,11 @@ main > section, #panel > section { margin-top: 3rem; }
 .tt-cell.is-free:hover { box-shadow: inset 0 0 0 2px var(--ink); }
 .tt-cell.is-free:hover .tt-plus { color: var(--ink); }
 .tt-cell.is-gone { box-shadow: inset 0 0 0 1px var(--rule); cursor: default; }
-.is-plan { background: var(--plan); color: var(--alabaster); }
-.is-own { background: var(--own); color: var(--alabaster); }
-.is-off { background: var(--off); color: var(--obsidian); }
-.is-wait {
+/* The status colors fill timetable cells and legend swatches only. */
+:is(.tt-cell, .swatch).is-plan { background: var(--plan); color: var(--alabaster); }
+:is(.tt-cell, .swatch).is-own { background: var(--own); color: var(--alabaster); }
+:is(.tt-cell, .swatch).is-off { background: var(--off); color: var(--obsidian); }
+:is(.tt-cell, .swatch).is-wait {
   background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--wait) 34%, transparent) 0 6px, transparent 6px 12px);
   box-shadow: inset 0 0 0 1.5px var(--wait);
 }
@@ -320,13 +321,11 @@ main > section, #panel > section { margin-top: 3rem; }
   margin: 0 0 1.5rem;
   padding: .1rem 0 .1rem .85rem;
   border-left: 6px solid var(--rule);
-  background: none;
-  color: inherit;
 }
 .entry.is-plan { border-left-color: var(--plan); }
 .entry.is-own { border-left-color: var(--own); }
 .entry.is-off { border-left-color: var(--off); }
-.entry.is-wait { border-left-color: var(--wait); box-shadow: none; }
+.entry.is-wait { border-left-color: var(--wait); }
 .entry p { margin-bottom: .35rem; overflow-wrap: anywhere; }
 
 .warn {
