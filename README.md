@@ -58,7 +58,7 @@ the system setting.
 The tab icon is the owl on a slate tile (`images/favicon.svg`, with PNG
 copies for older browsers and the iPhone home screen). A shared link shows a
 preview card (`images/social-card.png`, 1200x630) through Open Graph tags in
-`index.html`: the title, the dates, a slice of the timetable and the owl,
+`index.html`: the title, the dates, a slice of the timetable and the three animals,
 nothing from the calendar itself. The card is drawn from
 `tools/social-card.html` with the site's own stylesheet; after changing it or
 the icon, run `npm run images` (needs `playwright-core`). WhatsApp keeps its

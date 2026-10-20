@@ -1,7 +1,7 @@
 <!doctype html>
 <!-- The link preview image (images/social-card.png, 1200x630) that WhatsApp,
      Instagram and others show when the friends' link is shared. It uses the
-     site's own stylesheet, font and owl. Regenerate with: npm run images -->
+     site's own stylesheet, font and animals. Regenerate with: npm run images -->
 <html lang="es">
 <head>
   <meta charset="utf-8">
@@ -28,9 +28,16 @@
     }
     .grid .free { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--obsidian) 24%, var(--alabaster)); }
     .grid .join { background: color-mix(in srgb, var(--mahogany) 18%, var(--alabaster)); box-shadow: inset 0 0 0 3px var(--mahogany); }
-    .owl { position: absolute; z-index: 1; right: 172px; bottom: -4px; }
-    .owl .critter { width: 168px; height: 168px; }
-    .owl .critter * { stroke: var(--obsidian); }
+    /* The three animals stand on the color band. Each drawing ends at a
+       different height in its box, so each gets its own nudge down. */
+    .crew { position: absolute; z-index: 1; right: 64px; bottom: 14px; display: flex; align-items: flex-end; gap: 14px; }
+    .crew .critter { width: 140px; height: 140px; }
+    .crew .critter * { stroke: var(--obsidian); }
+    .crew .lobster { margin-bottom: -2px; }
+    .crew .frog { margin-bottom: -18px; }
+    .crew .owl { margin-bottom: -16px; }
+    /* The band is their ground: no frog shadow, no owl branch. */
+    .crew .frog .shadow, .crew .owl > path:first-child { display: none; }
     .band { position: absolute; left: 0; right: 0; bottom: 0; height: 14px; display: flex; }
     .band i { flex: 1; }
   </style>
@@ -50,7 +57,9 @@
       <i class="own"></i><i class="free"></i><i class="free"></i><i></i>
     </div>
   </div>
-  <div class="owl"><span data-critter="owl"></span></div>
+  <div class="crew">
+    <span data-critter="lobster"></span><span data-critter="frog"></span><span data-critter="owl"></span>
+  </div>
   <div class="band" aria-hidden="true">
     <i style="background: var(--mahogany)"></i><i style="background: var(--slate)"></i><i style="background: var(--pewter)"></i>
     <i style="background: var(--bronze)"></i><i style="background: var(--obsidian)"></i>
