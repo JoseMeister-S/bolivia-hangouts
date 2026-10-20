@@ -53,8 +53,14 @@ the system setting.
   copy holds only what that friend was allowed to read.
 - A device that already registered the invite code skips that write.
 - While the scripts load, one of three small animated animals (a blue
-  lobster, a frog, an owl) is picked at random. They are inline SVG with CSS
-  animation and stand still when the system asks for reduced motion.
+  lobster, a frog, an owl) is picked at random. They are SVG drawn by
+  `critters.js`, a small plain script that runs before the modules arrive,
+  with CSS animation; they stand still when the system asks for reduced
+  motion. Their eyes keep their colors in light and dark.
+- A wrong address gets `404.html` (GitHub Pages serves it at any depth): an
+  animal, a link, and after 10 seconds a redirect to the calendar, or to the
+  panel when the address mentions "admin". The query string goes along, so
+  an invite code in the link still works.
 
 ## Security model
 
@@ -177,8 +183,8 @@ The end-to-end run covers admin setup, a proposal, a private approval (other
 friends see only "Ocupado"), opening it, joining, the people summary, reserving
 time privately and then opening it, the `.ics` export, edits the proposer
 follows, opening and closing a plan again, participants, reject, reconsider and
-delete, the honeypot, removing reservations, the upgrade of older data and
-invite-code rotation. The pages run on a fixed date before the trip, so the
+delete, the honeypot, removing reservations, the upgrade of older data, the
+404 page and invite-code rotation. The pages run on a fixed date before the trip, so the
 result does not depend on the day it runs. For local work,
 `http://localhost:5500/?emulator` points the pages at the emulators.
 
