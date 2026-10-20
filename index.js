@@ -1,35 +1,37 @@
 // Friends' page: the trip as one timetable. Tap a free slot to propose a
 // hangout, tap a confirmed one to join it.
-import { signInAnonymously } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+import { signInAnonymously } from 'firebase/auth';
 import {
-  doc, collection, getDoc, getDocs, setDoc, writeBatch, query, where,
-  serverTimestamp, increment,
-} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js';
+  doc, collection, getDoc, getDocs, setDoc, writeBatch, query, where, serverTimestamp, increment,
+} from 'firebase/firestore/lite';
 import {
-  auth, db, SLOTS, slotById, LIMITS, tripDays, formatDay, todayInBolivia, el, clean,
-  cleanName, nameKey, store, friendLink, whatsappUrl, toast, renderTimetable, legend,
-  countdownText, plural,
+  auth, db, $, el, store, toast, friendLink, shareOnWhatsApp, wireSheet, renderTimetable, legend, participantDoc,
+  SLOTS, slotById, slotKey, LIMITS, tripDays, formatDay, todayInBolivia, clean, cleanName, nameKey,
+  countdownText, plural, freeText, reservationStatus, sentStatus,
 } from './common.js';
 
-const $ = (id) => document.getElementById(id);
-const PENDING_VISIBLE_DAYS = 7;
+// Everything this page keeps in the browser.
+const KEYS = { name: 'bh_name', code: 'bh_code', registered: 'bh_reg', sent: 'bh_sent', cache: 'bh_cache' };
+// Bump when the shape of the saved copy changes; an older copy is ignored.
+const CACHE_VERSION = 2;
 
 const state = {
   code: null,
-  name: cleanName(store.get('bh_name')),
+  name: cleanName(store.get(KEYS.name)),
   settings: null,
   blocked: new Map(),      // 'date_slot' -> { label, kind }: taken slots; label is '' unless Jose opened it
   hangouts: new Map(),     // 'date_slot' -> [hangout], only the ones Jose marked open
-  receipts: new Map(),     // proposal id -> 'approved' | 'rejected', for proposals sent from this device
   hangoutIds: new Set(),
   participants: new Map(), // hangout id -> [{ name }]
-  open: null,              // { date, slotId } of the slot shown in the sheet
+  receipts: new Map(),     // proposal id -> receipt, for proposals sent from this device
+  sent: [],                // what to draw of those proposals (sentStatus), set by render()
+  open: null,              // { date, slotId, proposing } of the slot shown in the sheet
 };
 
 // The invite code arrives as ?c=CODE and is remembered on this device.
 const urlCode = new URLSearchParams(location.search).get('c');
-if (urlCode) store.set('bh_code', urlCode);
-state.code = urlCode || store.get('bh_code');
+if (urlCode) store.set(KEYS.code, urlCode);
+state.code = urlCode || store.get(KEYS.code);
 
 function showGate() {
   $('status').hidden = true;
@@ -50,10 +52,9 @@ function showCalendar(fresh) {
 // The last timetable this device loaded. It is shown at once on the next
 // visit while the fresh data arrives. It holds only what this friend was
 // allowed to read.
-const CACHE = 'bh_cache';
-
 function saveCache() {
-  store.set(CACHE, JSON.stringify({
+  store.set(KEYS.cache, JSON.stringify({
+    version: CACHE_VERSION,
     code: state.code,
     settings: { trip_start: state.settings.trip_start, trip_end: state.settings.trip_end },
     blocked: [...state.blocked],
@@ -65,8 +66,8 @@ function saveCache() {
 
 function readCache() {
   try {
-    const cache = JSON.parse(store.get(CACHE) || 'null');
-    if (!cache || cache.code !== state.code) return false;
+    const cache = JSON.parse(store.get(KEYS.cache) || 'null');
+    if (cache?.version !== CACHE_VERSION || cache.code !== state.code) return false;
     state.settings = cache.settings;
     state.blocked = new Map(cache.blocked);
     state.hangouts = new Map(cache.hangouts);
@@ -86,10 +87,10 @@ async function connect() {
   await auth.authStateReady();
   if (!auth.currentUser) await signInAnonymously(auth);
   const key = `${auth.currentUser.uid}|${state.code}`;
-  if (store.get('bh_reg') === key) return false;
+  if (store.get(KEYS.registered) === key) return false;
   try {
     await setDoc(doc(db, 'members', auth.currentUser.uid), { code: state.code });
-    store.set('bh_reg', key);
+    store.set(KEYS.registered, key);
   } catch { /* wrong code: the load below fails and shows the gate */ }
   return true;
 }
@@ -109,7 +110,7 @@ async function start() {
     } catch (error) {
       // "Already registered" was remembered locally but is no longer true on the server.
       if (error.code !== 'permission-denied' || registered) throw error;
-      store.remove('bh_reg');
+      store.remove(KEYS.registered);
       await connect();
       await load();
     }
@@ -119,9 +120,9 @@ async function start() {
     await ready;
   } catch (error) {
     if (error.code === 'permission-denied') {
-      store.remove(CACHE);
-      store.remove('bh_reg');
-      if (!urlCode) store.remove('bh_code');
+      store.remove(KEYS.cache);
+      store.remove(KEYS.registered);
+      if (!urlCode) store.remove(KEYS.code);
       return showGate();
     }
     console.error(error);
@@ -136,79 +137,62 @@ async function start() {
 async function load() {
   // Friends may read only what Jose marked open. The rules refuse a hangouts
   // query that does not ask for open == true.
-  const [settings, blocked, hangouts] = await Promise.all([
+  const [settings, blocked, hangouts, receipts] = await Promise.all([
     getDoc(doc(db, 'settings', 'main')),
     getDocs(collection(db, 'blocked_slots')),
     getDocs(query(collection(db, 'hangouts'), where('open', '==', true))),
+    // What happened to the proposals sent from this device. A receipt that
+    // cannot be fetched counts as no answer yet.
+    Promise.all(readSent().map((p) => getDoc(doc(db, 'receipts', p.id))
+      .then((receipt) => (receipt.exists() ? [p.id, receipt.data()] : null), () => null))),
   ]);
+  const open = hangouts.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const names = await Promise.all(open.map((h) => getDocs(collection(db, 'hangouts', h.id, 'participants'))));
+
   state.settings = settings.data();
   state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
   state.hangouts = new Map();
-  state.hangoutIds = new Set();
-  state.participants = new Map();
-  await Promise.all(hangouts.docs.map(async (d) => {
-    const hangout = { id: d.id, ...d.data() };
-    const key = `${hangout.date}_${hangout.slot}`;
-    state.hangouts.set(key, [...(state.hangouts.get(key) || []), hangout]);
-    state.hangoutIds.add(d.id);
-    const names = await getDocs(collection(db, 'hangouts', d.id, 'participants'));
-    state.participants.set(d.id, names.docs.map((p) => p.data())
-      .sort((x, y) => (x.created_at?.seconds ?? 0) - (y.created_at?.seconds ?? 0)));
-  }));
-
-  // What happened to the proposals sent from this device.
-  state.receipts = new Map();
-  await Promise.all(readSent().map(async (p) => {
-    const receipt = await getDoc(doc(db, 'receipts', p.id)).catch(() => null);
-    if (receipt?.exists()) state.receipts.set(p.id, receipt.data().status);
-  }));
+  for (const h of open) {
+    const key = slotKey(h.date, h.slot);
+    state.hangouts.set(key, [...(state.hangouts.get(key) || []), h]);
+  }
+  state.hangoutIds = new Set(open.map((h) => h.id));
+  state.participants = new Map(open.map((h, i) => [h.id, names[i].docs.map((p) => p.data())
+    .sort((x, y) => (x.created_at?.seconds ?? 0) - (y.created_at?.seconds ?? 0))]));
+  state.receipts = new Map(receipts.filter(Boolean));
 }
 
-// Proposals sent from this device live in localStorage: friends cannot read
-// proposals from the server, and a confirmed plan stays private unless Jose
-// opens it, so this list is how the proposer still sees their own plan.
+// Proposals sent from this device: [{ id, date, slot, title }]. See sentStatus.
 function readSent() {
-  try { return JSON.parse(store.get('bh_sent') || '[]'); } catch { return []; }
-}
-
-// Each kept entry gets a status: 'wait' (no answer yet) or 'mine' (confirmed
-// and private). Rejected ones, and confirmed ones that are now open (they
-// arrive with the open hangouts), are dropped.
-function myPending() {
-  const cutoff = Date.now() - PENDING_VISIBLE_DAYS * 24 * 3600 * 1000;
-  const list = readSent().filter((p) => {
-    const receipt = state.receipts.get(p.id);
-    if (receipt === 'rejected' || state.hangoutIds.has(p.id)) return false;
-    return receipt === 'approved' || p.at > cutoff;
-  });
-  store.set('bh_sent', JSON.stringify(list));
-  return list.map((p) => ({ ...p, status: state.receipts.get(p.id) === 'approved' ? 'mine' : 'wait' }));
+  try { return JSON.parse(store.get(KEYS.sent) || '[]'); } catch { return []; }
 }
 
 const people = (hangout) => state.participants.get(hangout.id) || [];
 const isMine = (hangout) => !!state.name && people(hangout).some((p) => nameKey(p.name) === nameKey(state.name));
 
-function slotInfo(date, slotId, pending = myPending()) {
-  const key = `${date}_${slotId}`;
+function slotInfo(date, slotId) {
+  const key = slotKey(date, slotId);
   return {
     block: state.blocked.get(key) || null,
     hangouts: state.hangouts.get(key) || [],
-    mine: pending.filter((p) => p.date === date && p.slot === slotId),
+    mine: state.sent.filter((p) => p.date === date && p.slot === slotId),
   };
 }
 
 function render() {
   const { trip_start: start, trip_end: end } = state.settings;
   const today = todayInBolivia();
-  const pending = myPending();
   const days = tripDays(start, end);
+  const { keep, shown } = sentStatus(readSent(), state.receipts, state.hangoutIds, today);
+  store.set(KEYS.sent, JSON.stringify(keep));
+  state.sent = shown;
 
   const short = (iso) => formatDay(iso).replace(/^\S+\s/, '');
   $('lede').textContent = `Del ${short(start)} al ${short(end)}. ${countdownText(start, end, today)}.`;
 
   let free = 0;
   const cellFor = (date, slotId) => {
-    const { block, hangouts, mine } = slotInfo(date, slotId, pending);
+    const { block, hangouts, mine } = slotInfo(date, slotId);
     if (hangouts.length) {
       return {
         status: 'plan',
@@ -217,13 +201,13 @@ function render() {
         more: hangouts.length - 1,
       };
     }
-    const confirmed = mine.find((p) => p.status === 'mine');
+    const confirmed = mine.find((p) => p.status === 'confirmed');
     if (confirmed) return { status: 'plan', title: confirmed.title, sub: 'Confirmado' };
     if (block) {
       // No label: Jose kept it private, so all a friend learns is "taken".
       if (!block.label) return { status: 'off', title: 'Ocupado', merge: 'busy' };
-      const own = block.kind === 'personal';
-      return { status: own ? 'own' : 'off', title: block.label, merge: `${own}|${block.label}` };
+      const status = reservationStatus(block.kind);
+      return { status, title: block.label, merge: `${status}|${block.label}` };
     }
     if (mine.length) return { status: 'wait', title: mine[0].title, sub: 'Por confirmar' };
     if (date < today) return { status: 'gone' };
@@ -233,9 +217,9 @@ function render() {
   $('tt').replaceChildren(renderTimetable({ days, today, cellFor, onPick: openSlot }));
 
   const mineCount = [...state.hangouts.values()].flat().filter(isMine).length
-    + pending.filter((p) => p.status === 'mine').length;
+    + state.sent.filter((p) => p.status === 'confirmed').length;
   $('summary').textContent = [
-    free ? `${free === 1 ? 'Queda' : 'Quedan'} ${plural(free, 'espacio libre', 'espacios libres')}.` : 'Ya no quedan espacios libres.',
+    freeText(free),
     mineCount ? `Tienes ${plural(mineCount, 'plan', 'planes')} con Jose.` : '',
   ].join(' ');
 
@@ -258,9 +242,7 @@ function openSlot(date, slotId) {
   if (!$('sheet').open) $('sheet').showModal();
 }
 
-$('sheet-close').addEventListener('click', () => $('sheet').close());
-// A click on the backdrop (outside the sheet's box) closes it.
-$('sheet').addEventListener('click', (event) => { if (event.target === $('sheet')) $('sheet').close(); });
+wireSheet();
 
 // The name is asked for once, inside the first form that needs it.
 function nameField() {
@@ -269,13 +251,17 @@ function nameField() {
     el('input', { name: 'name', maxLength: LIMITS.name, required: true, autocomplete: 'given-name', placeholder: 'Ej. Caro' }));
 }
 
+function setName(name) {
+  state.name = name;
+  store.set(KEYS.name, name);
+}
+
 // Reads the name from a form (when it has the field) and remembers it.
 function takeName(form) {
   if (form.elements.name) {
     const name = cleanName(form.elements.name.value);
     if (!name) return false;
-    state.name = name;
-    store.set('bh_name', name);
+    setName(name);
   }
   return !!state.name;
 }
@@ -283,8 +269,7 @@ function takeName(form) {
 function changeName() {
   const name = cleanName(prompt('¿Cómo te llamas?', state.name) || '');
   if (!name) return;
-  state.name = name;
-  store.set('bh_name', name);
+  setName(name);
   render();
 }
 
@@ -295,7 +280,7 @@ function renderSheet() {
   const past = date < todayInBolivia();
   // A block that covers the whole day is described as such.
   const wholeDay = block && SLOTS.every((s) => {
-    const other = state.blocked.get(`${date}_${s.id}`);
+    const other = state.blocked.get(slotKey(date, s.id));
     return other && other.label === block.label && other.kind === block.kind;
   });
 
@@ -303,15 +288,15 @@ function renderSheet() {
   $('sheet-when').textContent = wholeDay ? 'Todo el día' : `${slot.label}, de ${slot.start} a ${slot.end}`;
 
   const body = [];
-  const confirmed = mine.filter((p) => p.status === 'mine');
-  const waiting = mine.filter((p) => p.status === 'wait');
+  const confirmed = mine.filter((p) => p.status === 'confirmed');
+  const waiting = mine.filter((p) => p.status === 'waiting');
   for (const p of confirmed) {
     body.push(el('div', { class: 'entry is-plan' },
       el('h3', {}, p.title),
       el('p', {}, 'Jose confirmó tu plan. Solo tú y Jose lo ven.')));
   }
   if (block && !confirmed.length) {
-    body.push(el('div', { class: 'entry is-' + (block.label && block.kind === 'personal' ? 'own' : 'off') },
+    body.push(el('div', { class: 'entry is-' + (block.label ? reservationStatus(block.kind) : 'off') },
       el('h3', {}, block.label || 'Ocupado'),
       el('p', {}, 'Jose no está disponible en este espacio.')));
   }
@@ -352,8 +337,7 @@ async function join(event, hangout) {
   button.disabled = true;
   try {
     await ready.catch(() => {});
-    await setDoc(doc(db, 'hangouts', hangout.id, 'participants', nameKey(state.name)),
-      { name: state.name, created_at: serverTimestamp() });
+    await setDoc(doc(db, 'hangouts', hangout.id, 'participants', nameKey(state.name)), participantDoc(state.name));
     toast('Apuntado.');
   } catch (error) {
     console.error(error);
@@ -378,7 +362,7 @@ function proposeForm(date, slotId, another) {
       el('span', { class: 'hint' }, 'Un café o una zona. No pongas direcciones exactas.')),
     el('label', {}, 'Nota para Jose (opcional)',
       el('textarea', { name: 'note', maxLength: LIMITS.note, rows: 2 }),
-      el('span', { class: 'hint' }, 'Solo Jose ve tu propuesta. Él decide si los demás ven el plan.')),
+      el('span', { class: 'hint' }, 'Solo Jose ve tu propuesta y tu nota. Él decide si los demás ven el plan.')),
     // Honeypot: people never see or fill this field; bots often do.
     el('div', { class: 'hp', 'aria-hidden': 'true' },
       el('label', {}, 'Sitio web', el('input', { name: 'website', tabIndex: -1, autocomplete: 'off' }))),
@@ -411,7 +395,7 @@ function proposeForm(date, slotId, another) {
     try {
       await ready.catch(() => {});
       const id = await sendProposal(data);
-      store.set('bh_sent', JSON.stringify([...readSent(), { id, date, slot: slotId, title, at: Date.now() }]));
+      store.set(KEYS.sent, JSON.stringify([...readSent(), { id, date, slot: slotId, title }]));
       $('sheet').close();
       toast('¡Enviado! Jose lo confirma pronto.');
       render();
@@ -452,9 +436,7 @@ async function sendProposal(data) {
 
 // ---- Share ----
 
-$('share').addEventListener('click', () => {
-  const text = `Jose va a estar en Cochabamba. Propón un plan o apúntate a uno aquí: ${friendLink(state.code)}`;
-  window.open(whatsappUrl(text), '_blank', 'noopener');
-});
+$('share').addEventListener('click', () =>
+  shareOnWhatsApp(`Jose va a estar en Cochabamba. Propón un plan o apúntate a uno aquí: ${friendLink(state.code)}`));
 
 start();

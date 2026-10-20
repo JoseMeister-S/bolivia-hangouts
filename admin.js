@@ -1,60 +1,101 @@
 // Admin page: approve/reject/edit proposals, manage approved hangouts,
-// participants, blocked slots and the invite code, and export an .ics file.
+// participants, reservations and the invite code, and export an .ics file.
 // Every write here is allowed only because firestore.rules finds the signed-in
 // user in the `admins` collection.
 import {
   GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut,
-} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
+} from 'firebase/auth';
 import {
-  doc, collection, collectionGroup, getDoc, getDocs, setDoc, updateDoc, deleteDoc,
-  writeBatch, serverTimestamp, Timestamp,
-} from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-lite.js';
+  doc, collection, collectionGroup, getDoc, getDocs, writeBatch, serverTimestamp, deleteField, Timestamp,
+} from 'firebase/firestore/lite';
 import {
-  auth, db, SLOTS, slotById, slotIndex, LIMITS, tripDays, formatDay, formatDayShort, el,
-  clean, cleanName, nameKey, friendLink, whatsappUrl, toast, todayInBolivia, renderTimetable,
-  legend, countdownText, plural, SLOT_HOURS,
+  auth, db, $, el, toast, friendLink, shareOnWhatsApp, wireSheet, renderTimetable, legend, participantDoc,
+  SLOTS, SLOT_IDS, slotById, slotIndex, slotKey, slotHours, LIMITS, tripDays, weekday, formatDay, clean,
+  cleanName, nameKey, todayInBolivia, countdownText, plural, freeText, reservationStatus, randomCode,
+  publicSlots, publicDiff, buildIcs,
 } from './common.js';
 
-const $ = (id) => document.getElementById(id);
 const VIEWS = ['status', 'login', 'not-admin', 'setup', 'panel'];
 const show = (id) => VIEWS.forEach((view) => { $(view).hidden = view !== id; });
 
+const HOST = 'Jose';
 const TRIP = { start: '2026-12-14', end: '2027-01-02' };
-const ALL = SLOTS.map((s) => s.id);
 const SEED_BLOCKS = [
-  ['2026-12-14', ALL, 'Llegando a Cochabamba (21:55)'],
+  ['2026-12-14', SLOT_IDS, 'Llegando a Cochabamba (21:55)'],
   ['2026-12-24', ['tarde', 'noche'], 'Nochebuena en familia'],
-  ['2026-12-25', ALL, 'Navidad en familia'],
+  ['2026-12-25', SLOT_IDS, 'Navidad en familia'],
   ['2026-12-31', ['tarde', 'noche'], 'Año Nuevo'],
   ['2027-01-01', ['manana', 'almuerzo'], 'Año Nuevo'],
   ['2027-01-02', ['tarde', 'noche'], 'Vuelo de vuelta'],
 ];
+// Version of the stored data; upgrade() brings older data up to it.
+const SCHEMA = 3;
 
 // reservations: my own time and blocks, with their real labels (admin-only).
-// blocked: the public projection friends read ("taken", plus a label only when open).
-const state = { settings: null, proposals: [], hangouts: [], participants: new Map(), reservations: [], blocked: [] };
+// hangouts: each one also carries its private side from `hangout_private`
+//   (note, and receipt: the id of the proposal it came from).
+// blocked: the public projection friends read, id -> document (publicSlots).
+// open: { date, slotId } of the slot shown in the sheet.
+const state = {
+  settings: null, proposals: [], hangouts: [], participants: new Map(), reservations: [], blocked: new Map(), open: null,
+};
 
 const bySlot = (a, b) =>
   a.date.localeCompare(b.date) || slotIndex(a.slot) - slotIndex(b.slot)
   || (a.created_at?.seconds ?? 0) - (b.created_at?.seconds ?? 0);
-const slotKey = (item) => `${item.date}_${item.slot}`;
 
-function randomCode(length = 20) {
-  // No look-alike characters (0/O, 1/l/I), easy to read aloud if needed.
-  const alphabet = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(length * 2));
-  let code = '';
-  for (const byte of bytes) {
-    // Rejection sampling keeps the distribution uniform.
-    if (byte < alphabet.length * 4 && code.length < length) code += alphabet[byte % alphabet.length];
-  }
-  return code.length === length ? code : randomCode(length);
+// ---- Writes ----
+
+// One action = one batch. The batch mirrors every change to reservations and
+// hangouts on a copy of the state, so commit() can rebuild what friends see
+// (blocked_slots) and write it in the same batch. The private data and the
+// public projection never disagree, not even when the reload afterwards fails.
+// Paths are arrays: ['hangouts', id] or ['hangouts', id, 'participants', key].
+function changes() {
+  const batch = writeBatch(db);
+  const draft = {
+    reservations: new Map(state.reservations.map((r) => [r.id, r])),
+    hangouts: new Map(state.hangouts.map((h) => [h.id, h])),
+  };
+  const mirrored = (path) => (path.length === 2 ? draft[path[0]] : null);
+  let writes = 0;
+  return {
+    set(path, data) {
+      batch.set(doc(db, ...path), data);
+      writes += 1;
+      mirrored(path)?.set(path[1], { id: path[1], ...data });
+    },
+    update(path, data) {
+      batch.update(doc(db, ...path), data);
+      writes += 1;
+      const items = mirrored(path);
+      if (items?.has(path[1])) items.set(path[1], { ...items.get(path[1]), ...data });
+    },
+    delete(path) {
+      batch.delete(doc(db, ...path));
+      writes += 1;
+      mirrored(path)?.delete(path[1]);
+    },
+    // Resolves to true when anything was written.
+    async commit() {
+      const wanted = publicSlots([...draft.reservations.values()], [...draft.hangouts.values()]);
+      const { set, remove } = publicDiff(state.blocked, wanted);
+      for (const [id, data] of set) batch.set(doc(db, 'blocked_slots', id), data);
+      for (const id of remove) batch.delete(doc(db, 'blocked_slots', id));
+      if (!writes && !set.length && !remove.length) return false;
+      await batch.commit();
+      state.blocked = wanted;
+      return true;
+    },
+  };
 }
 
-// Run a write, then reload everything. Keeps the screen and the database equal.
+// Run an action's writes as one batch, then reload everything.
 async function act(fn, done) {
   try {
-    await fn();
+    const tx = changes();
+    fn(tx);
+    await tx.commit();
     if (done) toast(done);
   } catch (error) {
     console.error(error);
@@ -62,6 +103,16 @@ async function act(fn, done) {
   }
   await refresh();
 }
+
+// A new id for a hangout. Friends see the ids of open hangouts, so a hangout
+// never reuses the id of the proposal it came from: that id opens the receipt.
+const newHangoutId = () => doc(collection(db, 'hangouts')).id;
+
+// What the proposer's device reads, by the proposal id, to show its own plan
+// even while it is private.
+const receiptFor = (status, item, hangout) => ({
+  status, date: item.date, slot: item.slot, title: item.title, ...(hangout ? { hangout } : {}),
+});
 
 // ---- Auth ----
 
@@ -107,21 +158,26 @@ async function copy(text) {
 
 async function refresh() {
   try {
-    const settings = await getDoc(doc(db, 'settings', 'main'));
-    if (!settings.exists()) return show('setup');
-    const [proposals, hangouts, participants, reservations, blocked] = await Promise.all([
+    const [settings, proposals, hangouts, privates, participants, reservations, blocked] = await Promise.all([
+      getDoc(doc(db, 'settings', 'main')),
       getDocs(collection(db, 'proposals')),
       getDocs(collection(db, 'hangouts')),
+      getDocs(collection(db, 'hangout_private')),
       getDocs(collectionGroup(db, 'participants')),
       getDocs(collection(db, 'reservations')),
       getDocs(collection(db, 'blocked_slots')),
     ]);
+    if (!settings.exists()) return show('setup');
     const rows = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const privateOf = new Map(privates.docs.map((d) => [d.id, d.data()]));
     state.settings = settings.data();
     state.proposals = rows(proposals).sort(bySlot);
-    state.hangouts = rows(hangouts).sort(bySlot);
+    // Hangouts from before schema 3 still carry their note; upgrade() moves it.
+    state.hangouts = rows(hangouts)
+      .map((h) => ({ ...h, note: h.note ?? '', receipt: null, ...privateOf.get(h.id) }))
+      .sort(bySlot);
     state.reservations = rows(reservations).sort(bySlot);
-    state.blocked = rows(blocked);
+    state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
     state.participants = new Map();
     for (const d of participants.docs) {
       const hangoutId = d.ref.parent.parent.id;
@@ -129,7 +185,8 @@ async function refresh() {
       list.push({ key: d.id, ...d.data() });
       state.participants.set(hangoutId, list);
     }
-    await syncPublic();
+    // An upgrade changes the data underneath: load it again.
+    if (await upgrade()) return refresh();
     render();
     show('panel');
   } catch (error) {
@@ -139,89 +196,60 @@ async function refresh() {
   }
 }
 
-// ---- What friends may see ----
-
-// Friends never read reservations or private plans. They read `blocked_slots`:
-// one document per taken slot, with a label only if I opened that item. This
-// rebuilds that projection from my data and writes just the differences, so
-// every action in this file can simply change the private data and reload.
-async function syncPublic() {
-  const batch = writeBatch(db);
-  let writes = 0;
-
-  // One-time upgrade of data from before the privacy model: old blocks keep
-  // the label friends already saw (open), old plans become private.
-  if (state.settings.schema !== 2) {
-    for (const b of state.blocked) {
-      if (!b.label || b.kind === 'busy' || state.reservations.some((r) => r.id === b.id)) continue;
-      const reservation = { date: b.date, slot: b.slot, label: b.label, kind: b.kind === 'personal' ? 'personal' : 'block', open: true };
-      batch.set(doc(db, 'reservations', b.id), reservation);
-      state.reservations.push({ id: b.id, ...reservation });
+// Brings data from older versions up to SCHEMA, and repairs the public
+// projection in case something changed the data from outside this page (the
+// Firebase console). Resolves to true when it upgraded the schema.
+async function upgrade() {
+  const tx = changes();
+  const schema = state.settings.schema ?? 1;
+  // 2: the privacy model. Old blocks keep the label friends already saw
+  // (open), old plans become private.
+  if (schema < 2) {
+    for (const [id, b] of state.blocked) {
+      if (!b.label || b.kind === 'busy' || state.reservations.some((r) => r.id === id)) continue;
+      tx.set(['reservations', id], { date: b.date, slot: b.slot, label: b.label, kind: b.kind === 'personal' ? 'personal' : 'block', open: true });
     }
-    state.reservations.sort(bySlot);
     for (const h of state.hangouts) {
-      if (typeof h.open === 'boolean') continue;
-      batch.update(doc(db, 'hangouts', h.id), { open: false });
-      h.open = false;
+      if (typeof h.open !== 'boolean') tx.update(['hangouts', h.id], { open: false });
     }
-    batch.update(doc(db, 'settings', 'main'), { schema: 2 });
-    state.settings.schema = 2;
-    writes += 1;
   }
-
-  const wanted = new Map();
-  for (const r of state.reservations) {
-    wanted.set(r.id, { date: r.date, slot: r.slot, label: r.open ? r.label : '', kind: r.kind });
+  // 3: a hangout's note is private, so it leaves the document friends may read.
+  if (schema < 3) {
+    for (const h of state.hangouts) {
+      tx.update(['hangouts', h.id], { note: deleteField() });
+      if (h.note) tx.set(['hangout_private', h.id], { note: h.note });
+    }
   }
-  for (const h of state.hangouts) {
-    const id = `${h.date}_${h.slot}`;
-    if (!h.open && !wanted.has(id)) wanted.set(id, { date: h.date, slot: h.slot, label: '', kind: 'busy' });
-  }
-  for (const b of state.blocked) {
-    const want = wanted.get(b.id);
-    wanted.delete(b.id);
-    if (!want) batch.delete(doc(db, 'blocked_slots', b.id));
-    else if (want.label !== b.label || want.kind !== b.kind) batch.set(doc(db, 'blocked_slots', b.id), want);
-    else continue;
-    writes += 1;
-  }
-  for (const [id, want] of wanted) {
-    batch.set(doc(db, 'blocked_slots', id), want);
-    writes += 1;
-  }
-  if (writes) await batch.commit();
+  if (schema < SCHEMA) tx.update(['settings', 'main'], { schema: SCHEMA });
+  const wrote = await tx.commit();
+  return wrote && schema < SCHEMA;
 }
 
 // ---- First-time setup ----
 
-$('setup-btn').addEventListener('click', () => act(async () => {
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'settings', 'main'), { invite_code: randomCode(), trip_start: TRIP.start, trip_end: TRIP.end, schema: 2 });
+$('setup-btn').addEventListener('click', () => act((tx) => {
+  tx.set(['settings', 'main'], { invite_code: randomCode(), trip_start: TRIP.start, trip_end: TRIP.end, schema: SCHEMA });
   // A window that started in 1970 is already over, so the first proposal opens a new one.
-  batch.set(doc(db, 'counters', 'proposals'), { count: 0, window_start: Timestamp.fromMillis(0), last_id: '' });
+  tx.set(['counters', 'proposals'], { count: 0, window_start: Timestamp.fromMillis(0), last_id: '' });
   for (const [date, slots, label] of SEED_BLOCKS) {
     // Travel and family days: friends see the label, so they know why.
-    for (const slot of slots) batch.set(doc(db, 'reservations', `${date}_${slot}`), { date, slot, label, kind: 'block', open: true });
+    for (const slot of slots) tx.set(['reservations', slotKey(date, slot)], { date, slot, label, kind: 'block', open: true });
   }
-  await batch.commit();
 }, 'Calendario creado.'));
 
 // ---- Render ----
 
-const blockAt = (date, slotId) => state.reservations.find((r) => r.id === `${date}_${slotId}`) || null;
-const setOpen = (collectionName, items, open) => act(async () => {
-  const batch = writeBatch(db);
-  for (const item of items) batch.update(doc(db, collectionName, item.id), { open });
-  await batch.commit();
-}, open ? 'Ahora es abierto: tus amigos lo ven.' : 'Ahora es privado: tus amigos ven «Ocupado».');
+const reservationAt = (date, slotId) => state.reservations.find((r) => r.id === slotKey(date, slotId)) || null;
 const hangoutsAt = (date, slotId) => state.hangouts.filter((h) => h.date === date && h.slot === slotId);
 const pendingAt = (date, slotId) =>
   state.proposals.filter((p) => p.status === 'pending' && p.date === date && p.slot === slotId);
-const namesOf = (hangout) => (state.participants.get(hangout.id) || []).map((p) => p.name);
+const peopleOf = (hangout) => state.participants.get(hangout.id) || [];
+const namesOf = (hangout) => peopleOf(hangout).map((p) => p.name);
 const slotName = (item) => slotById[item.slot]?.label ?? item.slot;
 const whenText = (item) => `${formatDay(item.date)}, ${slotName(item).toLowerCase()}`;
-
-let openSlotRef = null; // { date, slotId } of the slot shown in the sheet
+const setOpen = (collectionName, items, open) => act((tx) => {
+  for (const item of items) tx.update([collectionName, item.id], { open });
+}, open ? 'Ahora es abierto: tus amigos lo ven.' : 'Ahora es privado: tus amigos ven «Ocupado».');
 
 function render() {
   const { trip_start: start, trip_end: end, invite_code: code } = state.settings;
@@ -233,7 +261,7 @@ function render() {
 
   let free = 0;
   const cellFor = (date, slotId) => {
-    const block = blockAt(date, slotId);
+    const reservation = reservationAt(date, slotId);
     const hangouts = hangoutsAt(date, slotId);
     const waiting = pendingAt(date, slotId);
     if (hangouts.length) {
@@ -242,15 +270,15 @@ function render() {
         title: hangouts[0].title,
         sub: namesOf(hangouts[0]).join(', '),
         more: hangouts.length - 1 + waiting.length,
-        alert: hangouts.length > 1 || !!block, // two plans, or a plan on reserved time
+        alert: hangouts.length > 1 || !!reservation, // two plans, or a plan on reserved time
         open: hangouts[0].open,
       };
     }
-    if (block) {
-      const own = block.kind === 'personal';
+    if (reservation) {
+      const status = reservationStatus(reservation.kind);
       return {
-        status: own ? 'own' : 'off', title: block.label, more: waiting.length, open: block.open,
-        merge: waiting.length ? null : `${own}|${block.open}|${block.label}`,
+        status, title: reservation.label, more: waiting.length, open: reservation.open,
+        merge: waiting.length ? null : `${status}|${reservation.open}|${reservation.label}`,
       };
     }
     if (waiting.length) return { status: 'wait', title: waiting[0].title, sub: waiting[0].proposer_name, more: waiting.length - 1 };
@@ -265,7 +293,7 @@ function render() {
     state.hangouts.length
       ? `${plural(state.hangouts.length, 'plan confirmado', 'planes confirmados')} con ${plural(people.length, 'persona', 'personas')}.`
       : 'Todavía no hay planes confirmados.',
-    `${free === 1 ? 'Queda' : 'Quedan'} ${plural(free, 'espacio libre', 'espacios libres')}.`,
+    freeText(free),
     countdownText(start, end, today) + '.',
   ].join(' ');
 
@@ -277,23 +305,22 @@ function render() {
   $('pending').replaceChildren(...(pending.length ? pending.map(renderPending)
     : [el('p', { class: 'empty' }, 'Cuando un amigo proponga un plan, aparece aquí para que lo confirmes.')]));
   $('people').replaceChildren(renderPeople(people));
-  $('blocked').replaceChildren(renderBlockGroups());
+  $('reservations').replaceChildren(renderReservations());
   $('link').textContent = friendLink(code);
   $('rejected-count').textContent = rejected.length;
   $('rejected').replaceChildren(...(rejected.length ? rejected.map(renderRejected)
     : [el('p', { class: 'empty' }, 'No rechazaste ninguna propuesta.')]));
 
-  $('edit-form').elements.date.replaceChildren(...days.map((d) => el('option', { value: d }, formatDay(d))));
-  $('edit-form').elements.slot.replaceChildren(...SLOTS.map((s) => el('option', { value: s.id }, s.label)));
+  editFields.date.replaceChildren(...days.map((d) => el('option', { value: d }, formatDay(d))));
 
-  if ($('sheet').open && openSlotRef) renderSheet();
+  if ($('sheet').open && state.open) renderSheet();
 }
 
 // What already occupies the slot of a pending proposal.
 function conflictsFor(proposal) {
   const warnings = [];
-  const block = blockAt(proposal.date, proposal.slot);
-  if (block) warnings.push(`Ese espacio está reservado: ${block.label}.`);
+  const reservation = reservationAt(proposal.date, proposal.slot);
+  if (reservation) warnings.push(`Ese espacio está reservado: ${reservation.label}.`);
   for (const h of hangoutsAt(proposal.date, proposal.slot)) {
     warnings.push(`Ya confirmaste «${h.title}» con ${h.proposer_name} en ese espacio.`);
   }
@@ -309,15 +336,6 @@ function proposalText(p) {
     p.note ? el('p', { class: 'note' }, `«${p.note}»`) : null,
   ];
 }
-
-// The receipt is how the proposer's device learns the answer: it can be read
-// only by someone who knows the proposal id.
-const rejectProposal = (p) => act(async () => {
-  const batch = writeBatch(db);
-  batch.update(doc(db, 'proposals', p.id), { status: 'rejected' });
-  batch.set(doc(db, 'receipts', p.id), { status: 'rejected' });
-  await batch.commit();
-}, 'Rechazada.');
 
 function pendingActions(p) {
   const open = el('input', { type: 'checkbox' });
@@ -339,13 +357,12 @@ function renderRejected(p) {
   return el('article', { class: 'entry' },
     proposalText(p),
     el('div', { class: 'actions' },
-      el('button', { type: 'button', class: 'btn', onclick: () => act(async () => {
-        const batch = writeBatch(db);
-        batch.update(doc(db, 'proposals', p.id), { status: 'pending' });
-        batch.delete(doc(db, 'receipts', p.id));
-        await batch.commit();
-      }, 'Devuelta a por confirmar.') }, 'Volver a considerar'),
-      el('button', { type: 'button', class: 'btn text', onclick: () => confirm(`¿Borrar la propuesta «${p.title}»? No se puede deshacer.`) && act(() => deleteDoc(doc(db, 'proposals', p.id)), 'Borrada.') }, 'Borrar')));
+      el('button', { type: 'button', class: 'btn', onclick: () => reconsider(p) }, 'Volver a considerar'),
+      el('button', {
+        type: 'button', class: 'btn text',
+        onclick: () => confirm(`¿Borrar la propuesta «${p.title}»? No se puede deshacer.`)
+          && act((tx) => tx.delete(['proposals', p.id]), 'Borrada.'),
+      }, 'Borrar')));
 }
 
 // ---- Who I spend time with ----
@@ -354,10 +371,10 @@ function renderRejected(p) {
 function peopleSummary() {
   const people = new Map();
   for (const h of state.hangouts) {
-    for (const person of state.participants.get(h.id) || []) {
+    for (const person of peopleOf(h)) {
       const entry = people.get(person.key) || { name: person.name, hangouts: [], hours: 0 };
       entry.hangouts.push(h);
-      entry.hours += SLOT_HOURS[h.slot] || 0;
+      entry.hours += slotHours(h.slot);
       people.set(person.key, entry);
     }
   }
@@ -384,23 +401,22 @@ function renderPeople(people) {
 
 // ---- My time and blocks ----
 
+const removeReservations = (items) => act((tx) => {
+  for (const r of items) tx.delete(['reservations', r.id]);
+}, 'Quitado.');
+
 // Same label on many slots (gym every morning, a whole family day) is one row.
-function renderBlockGroups() {
+function renderReservations() {
   if (!state.reservations.length) return el('p', { class: 'empty' }, 'No tienes nada reservado. Toca un espacio libre del calendario para reservarlo.');
   const groups = new Map();
-  for (const b of state.reservations) {
-    const key = `${b.kind === 'personal'}|${b.open}|${b.label}`;
-    groups.set(key, [...(groups.get(key) || []), b]);
+  for (const r of state.reservations) {
+    const key = `${r.kind === 'personal'}|${r.open}|${r.label}`;
+    groups.set(key, [...(groups.get(key) || []), r]);
   }
-  const remove = (items, done) => act(async () => {
-    const batch = writeBatch(db);
-    for (const b of items) batch.delete(doc(db, 'reservations', b.id));
-    await batch.commit();
-  }, done);
   return el('ul', { class: 'groups' }, [...groups.values()].map((items) => {
     const first = items[0];
-    const days = new Set(items.map((b) => b.date)).size;
-    const oneSlot = items.every((b) => b.slot === first.slot);
+    const days = new Set(items.map((r) => r.date)).size;
+    const oneSlot = items.every((r) => r.slot === first.slot);
     const where = items.length === 1 ? whenText(first)
       : oneSlot ? `${slotName(first).toLowerCase()}, ${days} días`
       : days === 1 ? `${formatDay(first.date)}, ${items.length} espacios`
@@ -408,17 +424,17 @@ function renderBlockGroups() {
     return el('li', {},
       el('details', {},
         el('summary', {},
-          el('i', { class: 'swatch is-' + (first.kind === 'personal' ? 'own' : 'off') }),
+          el('i', { class: 'swatch is-' + reservationStatus(first.kind) }),
           el('strong', {}, first.label), ' ', el('span', { class: 'where' }, `${first.open ? 'Abierto' : 'Privado'}, ${where}`)),
-        el('ul', {}, items.map((b) => el('li', {},
-          el('span', {}, whenText(b)),
-          el('button', { type: 'button', class: 'btn text', onclick: () => remove([b], 'Quitado.') }, 'Quitar')))),
+        el('ul', {}, items.map((r) => el('li', {},
+          el('span', {}, whenText(r)),
+          el('button', { type: 'button', class: 'btn text', onclick: () => removeReservations([r]) }, 'Quitar')))),
       ),
       el('button', { type: 'button', class: 'btn text', onclick: () => setOpen('reservations', items, !first.open) },
         first.open ? 'Hacer privado' : 'Hacer abierto'),
       el('button', {
         type: 'button', class: 'btn text',
-        onclick: () => (items.length === 1 || confirm(`¿Quitar «${first.label}» de los ${items.length} espacios?`)) && remove(items, 'Quitado.'),
+        onclick: () => (items.length === 1 || confirm(`¿Quitar «${first.label}» de los ${items.length} espacios?`)) && removeReservations(items),
       }, items.length === 1 ? 'Quitar' : 'Quitar todo'),
     );
   }));
@@ -427,18 +443,17 @@ function renderBlockGroups() {
 // ---- Slot sheet (opened from the timetable) ----
 
 function openSlot(date, slotId) {
-  openSlotRef = { date, slotId };
+  state.open = { date, slotId };
   renderSheet();
   if (!$('sheet').open) $('sheet').showModal();
 }
 
-$('sheet-close').addEventListener('click', () => $('sheet').close());
-$('sheet').addEventListener('click', (event) => { if (event.target === $('sheet')) $('sheet').close(); });
+wireSheet();
 
 function renderSheet() {
-  const { date, slotId } = openSlotRef;
+  const { date, slotId } = state.open;
   const slot = slotById[slotId];
-  const block = blockAt(date, slotId);
+  const reservation = reservationAt(date, slotId);
   const hangouts = hangoutsAt(date, slotId);
   const waiting = pendingAt(date, slotId);
 
@@ -447,34 +462,33 @@ function renderSheet() {
 
   const body = [];
   if (hangouts.length > 1) body.push(el('p', { class: 'warn' }, `Hay ${hangouts.length} planes confirmados en este espacio.`));
-  if (hangouts.length && block) body.push(el('p', { class: 'warn' }, 'Hay un plan confirmado sobre tiempo reservado.'));
-  if (block) {
-    body.push(el('div', { class: 'entry is-' + (block.kind === 'personal' ? 'own' : 'off') },
-      el('h3', {}, block.label),
-      el('p', {}, block.open ? 'Abierto: mis amigos ven este texto.' : 'Privado: mis amigos solo ven «Ocupado».'),
+  if (hangouts.length && reservation) body.push(el('p', { class: 'warn' }, 'Hay un plan confirmado sobre tiempo reservado.'));
+  if (reservation) {
+    body.push(el('div', { class: 'entry is-' + reservationStatus(reservation.kind) },
+      el('h3', {}, reservation.label),
+      el('p', {}, reservation.open ? 'Abierto: mis amigos ven este texto.' : 'Privado: mis amigos solo ven «Ocupado».'),
       el('div', { class: 'actions' },
-        el('button', { type: 'button', class: 'btn', onclick: () => setOpen('reservations', [block], !block.open) }, block.open ? 'Hacer privado' : 'Hacer abierto'),
-        el('button', { type: 'button', class: 'btn text', onclick: () => act(() => deleteDoc(doc(db, 'reservations', block.id)), 'Quitado.') }, 'Quitar reserva'))));
+        el('button', { type: 'button', class: 'btn', onclick: () => setOpen('reservations', [reservation], !reservation.open) }, reservation.open ? 'Hacer privado' : 'Hacer abierto'),
+        el('button', { type: 'button', class: 'btn text', onclick: () => removeReservations([reservation]) }, 'Quitar reserva'))));
   }
   for (const h of hangouts) body.push(renderHangout(h));
   for (const p of waiting) body.push(renderPending(p));
-  if (!block) body.push(reserveForm(date, slot));
+  if (!reservation) body.push(reserveForm(date, slot));
   $('sheet-body').replaceChildren(...body);
 }
 
 function renderHangout(h) {
-  const people = state.participants.get(h.id) || [];
   return el('div', { class: 'entry is-plan' },
     el('h3', {}, h.title),
     el('p', {}, `Lo propuso ${h.proposer_name}${h.place ? ', en ' + h.place : ''}.`),
     h.note ? el('p', { class: 'note' }, `«${h.note}»`) : null,
     el('p', {}, h.open ? 'Abierto: mis amigos lo ven y se pueden apuntar.' : 'Privado: los demás solo ven «Ocupado».'),
     el('ul', { class: 'chips', 'aria-label': 'Quién viene' },
-      people.map((person) => el('li', {}, person.name,
+      peopleOf(h).map((person) => el('li', {}, person.name,
         el('button', {
           type: 'button', 'aria-label': `Quitar a ${person.name}`,
           onclick: () => confirm(`¿Quitar a ${person.name} de «${h.title}»?`)
-            && act(() => deleteDoc(doc(db, 'hangouts', h.id, 'participants', person.key)), 'Quitado.'),
+            && act((tx) => tx.delete(['hangouts', h.id, 'participants', person.key]), 'Quitado.'),
         }, '×'))),
       el('li', { class: 'add' }, el('button', { type: 'button', onclick: () => addParticipant(h) }, 'Añadir persona'))),
     el('div', { class: 'actions' },
@@ -487,7 +501,7 @@ const PRESETS = ['Gimnasio', 'Trabajo', 'Familia', 'Descanso'];
 
 // Reserve this slot for myself, optionally repeated across the trip.
 function reserveForm(date, slot) {
-  const label = el('input', { name: 'label', maxLength: 80, required: true, placeholder: 'Ej. Gimnasio' });
+  const label = el('input', { name: 'label', maxLength: LIMITS.title, required: true, placeholder: 'Ej. Gimnasio' });
   const lower = slot.label.toLowerCase();
   const repeat = el('select', { name: 'repeat' },
     el('option', { value: 'once' }, `Solo este día, ${lower}`),
@@ -508,36 +522,33 @@ function reserveForm(date, slot) {
     el('button', { type: 'submit', class: 'btn primary' }, 'Reservar'));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
-    const text = clean(label.value, 80);
+    const text = clean(label.value, LIMITS.title);
     if (!text) return;
     const days = tripDays(state.settings.trip_start, state.settings.trip_end);
-    const weekday = (d) => new Date(d + 'T00:00:00Z').getUTCDay();
     const targets = {
       once: [{ date, slot: slot.id }],
-      day: ALL.map((id) => ({ date, slot: id })),
+      day: SLOT_IDS.map((id) => ({ date, slot: id })),
       weekdays: days.filter((d) => weekday(d) >= 1 && weekday(d) <= 5).map((d) => ({ date: d, slot: slot.id })),
       daily: days.map((d) => ({ date: d, slot: slot.id })),
     }[repeat.value];
     // Slots that already have a reservation keep it. Slots with a confirmed
     // plan are reserved too and show up as a conflict, so I can decide.
-    const fresh = targets.filter((t) => !blockAt(t.date, t.slot));
+    const fresh = targets.filter((t) => !reservationAt(t.date, t.slot));
     const skipped = targets.length - fresh.length;
     const busy = fresh.filter((t) => hangoutsAt(t.date, t.slot).length).length;
     $('sheet').close();
     const joinable = who.value === 'join';
-    act(async () => {
-      const batch = writeBatch(db);
+    act((tx) => {
       for (const t of fresh) {
         // Something friends can join is a plan of mine; anything else is reserved time.
         if (joinable) {
-          batch.set(doc(collection(db, 'hangouts')), {
-            date: t.date, slot: t.slot, title: text, place: '', proposer_name: 'Jose', note: '', open: true, created_at: serverTimestamp(),
+          tx.set(['hangouts', newHangoutId()], {
+            date: t.date, slot: t.slot, title: text, place: '', proposer_name: HOST, open: true, created_at: serverTimestamp(),
           });
         } else {
-          batch.set(doc(db, 'reservations', `${t.date}_${t.slot}`), { date: t.date, slot: t.slot, label: text, kind: 'personal', open: who.value === 'open' });
+          tx.set(['reservations', slotKey(t.date, t.slot)], { date: t.date, slot: t.slot, label: text, kind: 'personal', open: who.value === 'open' });
         }
       }
-      await batch.commit();
     }, [
       `Reservado en ${plural(fresh.length, 'espacio', 'espacios')}.`,
       skipped ? `${plural(skipped, 'ya estaba reservado', 'ya estaban reservados')}.` : '',
@@ -550,49 +561,65 @@ function reserveForm(date, slot) {
 // ---- Actions ----
 
 // Approving moves the proposal into `hangouts`, the only collection friends
-// can read, and adds the proposer as the first participant.
+// can read, adds the proposer as the first participant, and keeps the note
+// and the proposal id on the private side.
 function approve(p, open = false) {
-  return act(async () => {
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'hangouts', p.id), {
+  return act((tx) => {
+    const id = newHangoutId();
+    tx.set(['hangouts', id], {
       date: p.date, slot: p.slot, title: p.title, place: p.place,
-      proposer_name: p.proposer_name, note: p.note, open, created_at: p.created_at ?? serverTimestamp(),
+      proposer_name: p.proposer_name, open, created_at: p.created_at ?? serverTimestamp(),
     });
-    batch.set(doc(db, 'receipts', p.id), { status: 'approved' });
+    tx.set(['hangout_private', id], { note: p.note, receipt: p.id });
+    tx.set(['receipts', p.id], receiptFor('approved', p, id));
     const name = cleanName(p.proposer_name);
-    if (name && name !== '.' && name !== '..') {
-      batch.set(doc(db, 'hangouts', p.id, 'participants', nameKey(name)), { name, created_at: serverTimestamp() });
-    }
-    batch.delete(doc(db, 'proposals', p.id));
-    await batch.commit();
+    if (name) tx.set(['hangouts', id, 'participants', nameKey(name)], participantDoc(name));
+    tx.delete(['proposals', p.id]);
   }, open ? 'Aprobado y abierto: tus amigos lo ven.' : `Aprobado. Solo ${p.proposer_name} y tú lo ven.`);
 }
 
+// The receipt is how the proposer's device learns the answer.
+const rejectProposal = (p) => act((tx) => {
+  tx.update(['proposals', p.id], { status: 'rejected' });
+  tx.set(['receipts', p.id], { status: 'rejected' });
+}, 'Rechazada.');
+
+const reconsider = (p) => act((tx) => {
+  tx.update(['proposals', p.id], { status: 'pending' });
+  tx.set(['receipts', p.id], receiptFor('pending', p));
+}, 'Devuelta a por confirmar.');
+
 function removeHangout(h) {
   if (!confirm(`¿Borrar el plan «${h.title}»? Tus amigos dejan de verlo.`)) return;
-  act(async () => {
-    const batch = writeBatch(db);
-    for (const person of state.participants.get(h.id) || []) {
-      batch.delete(doc(db, 'hangouts', h.id, 'participants', person.key));
-    }
-    batch.delete(doc(db, 'hangouts', h.id));
-    batch.set(doc(db, 'receipts', h.id), { status: 'rejected' });
-    await batch.commit();
+  act((tx) => {
+    for (const person of peopleOf(h)) tx.delete(['hangouts', h.id, 'participants', person.key]);
+    tx.delete(['hangouts', h.id]);
+    tx.delete(['hangout_private', h.id]);
+    // Plans approved before schema 3 have their receipt under their own id.
+    tx.set(['receipts', h.receipt ?? h.id], { status: 'rejected' });
   }, 'Plan borrado.');
 }
 
 function addParticipant(h) {
   const name = cleanName(prompt(`¿Quién más viene a «${h.title}»?`) || '');
-  if (!name || name === '.' || name === '..') return;
-  act(() => setDoc(doc(db, 'hangouts', h.id, 'participants', nameKey(name)), { name, created_at: serverTimestamp() }), 'Añadido.');
+  if (!name) return;
+  act((tx) => tx.set(['hangouts', h.id, 'participants', nameKey(name)], participantDoc(name)), 'Añadido.');
 }
 
-let editing = null;
+// ---- Edit dialog (a pending proposal or a confirmed plan) ----
+
+const editFields = $('edit-form').elements;
+editFields.title.maxLength = LIMITS.title;
+editFields.place.maxLength = LIMITS.place;
+editFields.proposer_name.maxLength = LIMITS.name;
+editFields.note.maxLength = LIMITS.note;
+editFields.slot.replaceChildren(...SLOTS.map((s) => el('option', { value: s.id }, s.label)));
+
+let editing = null; // { collectionName, item }
 
 function openEdit(collectionName, item) {
-  editing = { collectionName, id: item.id };
-  const fields = $('edit-form').elements;
-  for (const name of ['date', 'slot', 'title', 'place', 'proposer_name', 'note']) fields[name].value = item[name] ?? '';
+  editing = { collectionName, item };
+  for (const name of ['date', 'slot', 'title', 'place', 'proposer_name', 'note']) editFields[name].value = item[name] ?? '';
   $('edit-dialog').showModal();
 }
 
@@ -600,120 +627,51 @@ $('edit-cancel').addEventListener('click', () => $('edit-dialog').close());
 
 $('edit-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const fields = $('edit-form').elements;
   const data = {
-    date: fields.date.value,
-    slot: fields.slot.value,
-    title: clean(fields.title.value, LIMITS.title),
-    place: clean(fields.place.value, LIMITS.place),
-    proposer_name: cleanName(fields.proposer_name.value),
-    note: clean(fields.note.value, LIMITS.note),
+    date: editFields.date.value,
+    slot: editFields.slot.value,
+    title: clean(editFields.title.value, LIMITS.title),
+    place: clean(editFields.place.value, LIMITS.place),
+    proposer_name: cleanName(editFields.proposer_name.value),
+    note: clean(editFields.note.value, LIMITS.note),
   };
   if (!editing || !data.title || !data.proposer_name) return;
-  const { collectionName, id } = editing;
+  const { collectionName, item } = editing;
   $('edit-dialog').close();
   // The slot may have changed: follow the item to its new place.
-  if ($('sheet').open) openSlotRef = { date: data.date, slotId: data.slot };
-  act(() => updateDoc(doc(db, collectionName, id), data), 'Cambios guardados.');
+  if ($('sheet').open) state.open = { date: data.date, slotId: data.slot };
+  act((tx) => {
+    if (collectionName === 'proposals') {
+      tx.update(['proposals', item.id], data);
+      // The proposer's page shows their proposal where it is now.
+      tx.set(['receipts', item.id], receiptFor('pending', data));
+      return;
+    }
+    const { note, ...shared } = data;
+    tx.update(['hangouts', item.id], shared);
+    tx.set(['hangout_private', item.id], { note, ...(item.receipt ? { receipt: item.receipt } : {}) });
+    // Plans approved before schema 3 share their id with their receipt, and
+    // friends may know that id, so their receipt only ever says 'approved'.
+    if (item.receipt) tx.set(['receipts', item.receipt], receiptFor('approved', data, item.id));
+  }, 'Cambios guardados.');
 });
 
+// ---- Invite link ----
+
 $('copy-link').addEventListener('click', () => copy($('link').textContent));
-$('share-link').addEventListener('click', () => {
-  const text = `¡Voy a Cochabamba! Propón un plan o apúntate a uno aquí: ${$('link').textContent}`;
-  window.open(whatsappUrl(text), '_blank', 'noopener');
-});
+$('share-link').addEventListener('click', () =>
+  shareOnWhatsApp(`¡Voy a Cochabamba! Propón un plan o apúntate a uno aquí: ${$('link').textContent}`));
 $('rotate').addEventListener('click', () => {
   if (!confirm('¿Cambiar el código? Todos los enlaces que ya mandaste dejan de funcionar.')) return;
-  act(() => updateDoc(doc(db, 'settings', 'main'), { invite_code: randomCode() }), 'Código cambiado. Manda el enlace nuevo.');
+  act((tx) => tx.update(['settings', 'main'], { invite_code: randomCode() }), 'Código cambiado. Manda el enlace nuevo.');
 });
 
 // ---- .ics export ----
 
-function buildIcs(hangouts) {
-  const escape = (text) => String(text ?? '')
-    .replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
-  // RFC 5545: lines are at most 75 octets; continuation lines start with a space.
-  const encoder = new TextEncoder();
-  const fold = (line) => {
-    const parts = [];
-    let current = '';
-    let size = 0;
-    for (const char of line) {
-      const length = encoder.encode(char).length;
-      if (size + length > 75) {
-        parts.push(current);
-        current = ' ';
-        size = 1;
-      }
-      current += char;
-      size += length;
-    }
-    parts.push(current);
-    return parts.join('\r\n');
-  };
-  const local = (date, time) => `${date.replaceAll('-', '')}T${time.replace(':', '')}00`;
-  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
-
-  const lines = [
-    'BEGIN:VCALENDAR',
-    'VERSION:2.0',
-    'PRODID:-//bolivia-hangouts//ES',
-    'CALSCALE:GREGORIAN',
-    'METHOD:PUBLISH',
-    'X-WR-CALNAME:Cochabamba',
-    'X-WR-TIMEZONE:America/La_Paz',
-    'BEGIN:VTIMEZONE',
-    'TZID:America/La_Paz',
-    'BEGIN:STANDARD',
-    'DTSTART:19700101T000000',
-    'TZOFFSETFROM:-0400',
-    'TZOFFSETTO:-0400',
-    'TZNAME:-04',
-    'END:STANDARD',
-    'END:VTIMEZONE',
-  ];
-  for (const h of hangouts) {
-    const slot = slotById[h.slot];
-    if (!slot) continue;
-    const people = (state.participants.get(h.id) || []).map((p) => p.name);
-    const description = [
-      `Propuesto por ${h.proposer_name}`,
-      `Vienen: ${people.length ? people.join(', ') : 'nadie todavía'}`,
-      h.note ? `Nota: ${h.note}` : null,
-    ].filter(Boolean).join('\n');
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:${h.id}@bolivia-hangouts`,
-      `DTSTAMP:${stamp}`,
-      `DTSTART;TZID=America/La_Paz:${local(h.date, slot.start)}`,
-      `DTEND;TZID=America/La_Paz:${local(h.date, slot.end)}`,
-      `SUMMARY:${escape(h.title)}`,
-      h.place ? `LOCATION:${escape(h.place)}` : null,
-      `DESCRIPTION:${escape(description)}`,
-      'END:VEVENT',
-    );
-  }
-  for (const b of state.reservations.filter((b) => b.kind === 'personal')) {
-    const slot = slotById[b.slot];
-    if (!slot) continue;
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:${b.id}@bolivia-hangouts`,
-      `DTSTAMP:${stamp}`,
-      `DTSTART;TZID=America/La_Paz:${local(b.date, slot.start)}`,
-      `DTEND;TZID=America/La_Paz:${local(b.date, slot.end)}`,
-      `SUMMARY:${escape(b.label)}`,
-      'END:VEVENT',
-    );
-  }
-  lines.push('END:VCALENDAR');
-  return lines.filter(Boolean).map(fold).join('\r\n') + '\r\n';
-}
-
 $('export').addEventListener('click', () => {
-  if (!state.hangouts.length && !state.reservations.some((b) => b.kind === 'personal')) return toast('Todavía no hay planes ni reservas que descargar.');
-  const blob = new Blob([buildIcs(state.hangouts)], { type: 'text/calendar;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  if (!state.hangouts.length && !state.reservations.some((r) => r.kind === 'personal')) return toast('Todavía no hay planes ni reservas que descargar.');
+  const ics = buildIcs({ hangouts: state.hangouts, reservations: state.reservations, participants: state.participants });
+  const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
   const link = el('a', { href: url, download: 'cochabamba.ics' });
   document.body.append(link);
   link.click();

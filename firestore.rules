@@ -10,10 +10,14 @@ rules_version = '2';
 //   Friends can read only hangouts with open == true (and their participants).
 //   For everything else they see `blocked_slots`, a public projection that
 //   says "this slot is taken" and carries a label only when the admin opened
-//   it. The real labels live in `reservations`, which is admin-only.
-// - `receipts/{proposalId}` tells a proposer whether their own proposal was
-//   confirmed. It can be fetched only by id, and only the proposer's device
-//   knows that id.
+//   it. The real labels live in `reservations`, which is admin-only. A
+//   hangout's note to the host lives in `hangout_private`, also admin-only,
+//   because a friend who may read a hangout reads all of its fields.
+// - `receipts/{proposalId}` tells a proposer what happened to their own
+//   proposal (and its date, slot and title, which the admin may have edited).
+//   It can be fetched only by id, and only the proposer's device knows that
+//   id: an approved hangout gets a new id, so the ids friends see on open
+//   hangouts never open a receipt.
 // - Admin = signed-in user with a document in `admins`. That collection cannot
 //   be written by any client; add the document in the Firebase console.
 service cloud.firestore {
@@ -75,7 +79,12 @@ service cloud.firestore {
 
     match /blocked_slots/{id} {
       allow read: if isMember() || isAdmin();
-      allow write: if isAdmin();
+      // A private item carries no label and the neutral kind 'busy', so a
+      // friend cannot tell a private plan from the host's private time.
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['date', 'slot', 'label', 'kind'])
+        && (request.resource.data.label != '' || request.resource.data.kind == 'busy');
+      allow delete: if isAdmin();
     }
 
     match /reservations/{id} {
@@ -90,7 +99,9 @@ service cloud.firestore {
     match /hangouts/{id} {
       // A friend's query must itself ask for open == true, or it is refused.
       allow read: if isAdmin() || (isMember() && resource.data.open == true);
-      allow write: if isAdmin();
+      // The note stays out: it goes to hangout_private.
+      allow create, update: if isAdmin() && !request.resource.data.keys().hasAny(['note']);
+      allow delete: if isAdmin();
 
       match /participants/{pid} {
         // The document id is the lower-cased name, which makes names unique
@@ -106,6 +117,11 @@ service cloud.firestore {
           && pid == request.resource.data.name.lower();
         allow read, write: if isAdmin();
       }
+    }
+
+    // The admin-only side of a hangout: { note, receipt (the proposal id) }.
+    match /hangout_private/{id} {
+      allow read, write: if isAdmin();
     }
 
     // Collection-group read for the admin page (all names in one query).
@@ -135,8 +151,8 @@ service cloud.firestore {
       allow read, update, delete: if isAdmin();
     }
 
-    // Rate limit: at most 20 proposals per rolling 24 h window, all friends
-    // together. A proposal must bump this counter in the same batch.
+    // Rate limit: at most 20 proposals per 24 h window, all friends together.
+    // The window starts with the first proposal after the previous one ended. A proposal must bump this counter in the same batch.
     match /counters/proposals {
       allow update: if isMember()
         && request.resource.data.keys().hasOnly(['count', 'window_start', 'last_id'])
