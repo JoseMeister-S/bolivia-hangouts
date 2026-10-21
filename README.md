@@ -28,6 +28,29 @@ are used only for display and for the `.ics` export.
 | `index.html?c=CODE` | Friends | The trip as a timetable, one week (at most 7 days) on screen, the other weeks a swipe away: a row per day, a column per slot. A friend sees free slots, slots that are taken ("Ocupado"), the plans you marked open, and their own proposals. Tap a free slot to propose a plan, tap an open plan to join it. The name is asked for once, in the first form that needs it. |
 | `admin.html` | The host | Google sign-in. The same timetable with pending proposals and clashes marked. Tap a slot to approve, reject or edit what is in it, manage who is coming, switch an item between private and open, or reserve the slot for yourself (for example the gym on weekday mornings, in one step) and choose who sees it. Below it: the queue to confirm, who you spend the most time with, your reservations, the invite link and code rotation, and the `.ics` export. |
 
+### For friends, day to day
+
+- **Tus planes**: above the timetable, the friend's own plans and proposals
+  still ahead, soonest first; one tap opens each.
+- **Ya no puedo ir**: a friend leaves an open plan they joined, and their
+  place is free again. For a private plan (only Jose can change it) the button
+  opens a WhatsApp message to Jose instead.
+- **Retirar propuesta**: a proposal that still waits can be taken back from
+  the phone that sent it.
+- **Avisar a Jose**: after proposing, leaving or withdrawing, a ready
+  WhatsApp message to Jose. With his number set in the panel ("Tu
+  WhatsApp") it opens his chat; without it, WhatsApp asks whom to send it to.
+  In the panel, Jose has the same for a confirmed plan or a rejection.
+- **Añadir a mi calendario**: in a plan the friend is in, Google Calendar or
+  an `.ics` file for any other calendar, with the times and the place.
+- **Always current**: coming back to the page after half a minute away (for
+  example from WhatsApp) loads the current data, unless a dialog is open.
+- Questions and confirmations are the page's own dialogs, not the browser's
+  pop-ups.
+- **Large text**: when the reader's text size makes four columns too narrow,
+  each day of the timetable becomes a list, one line per slot with its name.
+  Screen readers hear every cell as day, slot and what is in it.
+
 ### Limits and places
 
 - **How many people.** A plan can have a limit: the size of the whole
@@ -147,6 +170,10 @@ Firebase web config.
 - **Places.** `hangout_places/{id}` (`map_url`, `lat`, `lng`) is readable by
   the admin and by the devices that joined the plan. A stored link must be
   `http(s)://`, and a pin must be in range.
+- **Leaving and withdrawing.** A friend may delete only their own
+  participant (the key in their device's `joined` document) together with
+  that document and `going` minus one, and only from an open plan. A pending
+  proposal may be deleted by the device whose `uid` it carries.
 - **Rate limit.** At most 20 proposals per 24-hour window across all friends;
   the window starts with the first proposal after the previous one ended.
   Each proposal must bump `counters/proposals` in the same batch, and the rules
@@ -233,8 +260,13 @@ follows, opening and closing a plan again, participants, reject, reconsider and
 delete, the honeypot, removing reservations, a plan with a limit and a place
 (pasted link, joinable look, full for the rest, map links, a short link and a
 tap on the map), the upgrade of older data, the 404 page and invite-code
-rotation. The pages run on a fixed date before the trip, so the
-result does not depend on the day it runs. For local work,
+rotation, plus leaving, withdrawing, the WhatsApp messages, the
+calendar buttons and the refresh on return. Every main view (both themes,
+the sheets, the forms with a map, the dialogs, the 404 page) is checked with
+[axe-core](https://github.com/dequelabs/axe-core) against WCAG 2.2 AA. A
+browser pop-up (`confirm()`, `prompt()`) counts as a failure. The pages run
+on a fixed date before the trip, so the result does not depend on the day it
+runs. For local work,
 `http://localhost:5500/?emulator` points the pages at the emulators.
 
 ## License

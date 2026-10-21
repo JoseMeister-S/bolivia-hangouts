@@ -7,6 +7,7 @@ import { getFirestore, connectFirestoreEmulator, serverTimestamp } from 'firebas
 import { firebaseConfig } from './config.js';
 import {
   SLOTS, HOME, CAPACITY, formatDay, dayParts, weekday, parseLocation, cleanPlace, cleanMapUrl, hasPlace, mapLinks,
+  whatsappUrl, googleCalendarUrl, buildIcs,
 } from './lib.js';
 
 export * from './lib.js';
@@ -65,8 +66,85 @@ export function friendLink(code) {
   return url.href.replace('/index.html?', '/?');
 }
 
-export function shareOnWhatsApp(text) {
-  window.open('https://wa.me/?text=' + encodeURIComponent(text), '_blank', 'noopener');
+// Opens WhatsApp with a message ready: to `phone` when given, otherwise
+// WhatsApp asks whom to send it to.
+export function shareOnWhatsApp(text, phone = '') {
+  window.open(whatsappUrl(text, phone), '_blank', 'noopener');
+}
+
+// A link-styled button that opens WhatsApp with a message (for the tests and
+// for people, the href is the message).
+export const whatsappButton = (label, text, phone = '', extra = '') =>
+  el('a', { class: 'btn small' + extra, href: whatsappUrl(text, phone), target: '_blank', rel: 'noopener' }, label);
+
+// Saves text as a file (the .ics exports).
+export function download(text, filename, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const link = el('a', { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// "Add to my calendar" for one plan: Google Calendar, or an .ics file that
+// iPhone, Outlook and the rest open. plan: { id, date, slot, title, place,
+// proposer_name, location }.
+export function calendarButtons(plan, participants = new Map()) {
+  const pin = plan.location?.lat != null ? `${plan.location.lat},${plan.location.lng}` : '';
+  const google = googleCalendarUrl({
+    date: plan.date, slot: plan.slot, title: plan.title, place: plan.place || pin, details: 'Plan con Jose en Cochabamba.',
+  });
+  const ics = () => download(buildIcs({ hangouts: [plan], reservations: [], participants }), 'plan.ics', 'text/calendar;charset=utf-8');
+  return el('div', { class: 'actions calendar' },
+    el('a', { class: 'btn small', href: google, target: '_blank', rel: 'noopener' }, 'Añadir a Google Calendar'),
+    el('button', { type: 'button', class: 'btn small', onclick: ics }, 'Descargar para otro calendario'));
+}
+
+// ---- Dialogs ----
+
+// An in-page question instead of confirm() and prompt(). Resolves to true or
+// false; with `input` ({ label, value, maxLength }) to the typed text, or null
+// when cancelled.
+export function ask({ title, text = '', confirm = 'Aceptar', cancel = 'Cancelar', input = null }) {
+  return new Promise((resolve) => {
+    const field = input
+      ? el('input', { name: 'answer', value: input.value ?? '', maxLength: input.maxLength, required: true, autocomplete: 'off' })
+      : null;
+    const dialog = el('dialog', { class: 'sheet ask', 'aria-labelledby': 'ask-title' },
+      el('form', { method: 'dialog' },
+        el('h2', { id: 'ask-title' }, title),
+        text ? el('p', {}, text) : null,
+        field ? el('label', {}, input.label, field) : null,
+        el('div', { class: 'actions' },
+          el('button', { type: 'submit', class: 'btn primary', value: 'yes' }, confirm),
+          el('button', { type: 'button', class: 'btn text', onclick: () => dialog.close('no') }, cancel))));
+    dialog.addEventListener('close', () => {
+      dialog.remove();
+      const yes = dialog.returnValue === 'yes';
+      resolve(field ? (yes ? field.value : null) : yes);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    field?.select();
+  });
+}
+
+// ---- Keeping the page current ----
+
+// Calls fn when the page comes back into view after `away` ms or more (a
+// friend returns to the WhatsApp browser), unless a dialog is open: a reload
+// must not wipe what someone is typing.
+export function onReturn(fn, away = 30_000) {
+  let hiddenAt = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      hiddenAt = performance.now();
+    } else if (hiddenAt != null && performance.now() - hiddenAt >= away && !document.querySelector('dialog[open]')) {
+      hiddenAt = null;
+      fn();
+    }
+  });
 }
 
 let toastTimer;
@@ -83,11 +161,19 @@ export function toast(message) {
 }
 
 // The slot sheet: its close button and a click on the backdrop (outside the
-// sheet's box) close it.
-export function wireSheet() {
+// sheet's box) close it. Closing puts the focus back on the slot's cell (the
+// timetable may have been redrawn meanwhile); opened() is the open slot.
+export function wireSheet(opened) {
   const sheet = $('sheet');
   $('sheet-close').addEventListener('click', () => sheet.close());
   sheet.addEventListener('click', (event) => { if (event.target === sheet) sheet.close(); });
+  sheet.addEventListener('close', () => {
+    const slot = opened();
+    if (!slot) return;
+    requestAnimationFrame(() => {
+      document.querySelector(`.tt-cell[data-date="${slot.date}"][data-slot="${slot.slotId}"]`)?.focus();
+    });
+  });
 }
 
 // ---- How many people ----
@@ -151,7 +237,9 @@ export function placePicker(initial = {}) {
     placeholder: 'Pega un enlace de Google Maps o toca el mapa',
   });
   const hint = el('span', { class: 'hint' });
-  const box = el('div', { class: 'map' });
+  const box = el('div', {
+    class: 'map', role: 'region', 'aria-label': 'Mapa: toca para poner el pin, o pega arriba un enlace con coordenadas',
+  });
 
   const showHint = () => {
     hint.textContent = pin ? 'Pin puesto. Puedes arrastrarlo para ajustarlo.'
@@ -206,7 +294,7 @@ export function placeView(place, label = '') {
   if (place.lat != null) {
     const { google, apple } = mapLinks(place, label);
     links.push(open(google, 'Abrir en Google Maps'), open(apple, 'Abrir en Apple Maps'));
-    box = el('div', { class: 'map is-small' });
+    box = el('div', { class: 'map is-small', role: 'region', 'aria-label': `Mapa: dónde es ${label || 'el plan'}` });
     whenShown(box, async () => {
       try {
         const { L, map } = await drawMap(box, { ...place, zoom: PIN_ZOOM });
@@ -272,10 +360,17 @@ export function renderTimetable({ days, today, cellFor, onPick }) {
           + (cell.joinable ? ' is-joinable' : ''),
         style: cell.span > 1 ? `grid-column: span ${cell.span}` : null,
         disabled: cell.status === 'gone',
-        'aria-label': `${formatDay(date)}, ${cell.span === SLOTS.length ? 'todo el día' : cell.slot.label}: ${cell.title || 'libre'}`,
+        dataset: { date, slot: cell.slot.id },
         onclick: () => onPick(date, cell.slot.id),
       },
-        cell.status === 'free' ? el('span', { class: 'tt-plus', 'aria-hidden': 'true' }, '+') : null,
+        // The name is the day and slot (heard, not seen) and then what the
+        // cell shows, all of it even when a long title is cut on screen.
+        el('span', { class: 'sr-only' }, `${formatDay(date)}, ${cell.span === SLOTS.length ? 'todo el día' : cell.slot.label}: `),
+        cell.status === 'free' ? [el('span', { class: 'tt-plus', 'aria-hidden': 'true' }, '+'), el('span', { class: 'sr-only' }, 'libre')] : null,
+        cell.status === 'gone' ? el('span', { class: 'sr-only' }, 'ya pasó') : null,
+        // Shown only in the list layout for large text (app.css), where the
+        // column headings are gone; screen readers already heard it.
+        el('span', { class: 'tt-when', 'aria-hidden': 'true' }, cell.span === SLOTS.length ? 'Todo el día' : cell.slot.label),
         cell.title ? el('span', { class: 'tt-t' }, cell.title) : null,
         cell.sub ? el('span', { class: 'tt-s' }, cell.sub) : null,
         cell.more ? el('span', { class: 'tt-more' }, `+${cell.more}`) : null,

@@ -9,7 +9,8 @@ import {
   doc, collection, collectionGroup, getDoc, getDocs, writeBatch, serverTimestamp, deleteField, Timestamp,
 } from 'firebase/firestore/lite';
 import {
-  auth, db, $, el, toast, friendLink, shareOnWhatsApp, wireSheet, renderTimetable, legend, participantDoc,
+  auth, db, $, el, toast, friendLink, shareOnWhatsApp, whatsappButton, download, ask, onReturn, wireSheet,
+  renderTimetable, legend, participantDoc, whenLong, cleanPhone,
   placePicker, placeView, capacityInput, CAPACITY_ERROR, SLOTS, SLOT_IDS, slotById, slotIndex, slotKey, slotHours, LIMITS, CAPACITY,
   tripDays, weekday, formatDay, clean, cleanName, nameKey, todayInBolivia, countdownText, plural, freeText,
   reservationStatus, randomCode, publicSlots, publicDiff, buildIcs, cleanCapacity, isFull, spotsLeft,
@@ -333,6 +334,9 @@ function render() {
   $('people').replaceChildren(renderPeople(people));
   $('reservations').replaceChildren(renderReservations());
   $('link').textContent = friendLink(code);
+  if (document.activeElement !== $('phone-form').elements.phone) {
+    $('phone-form').elements.phone.value = state.settings.host_phone ? '+' + state.settings.host_phone : '';
+  }
   $('rejected-count').textContent = rejected.length;
   $('rejected').replaceChildren(...(rejected.length ? rejected.map(renderRejected)
     : [el('p', { class: 'empty' }, 'No rechazaste ninguna propuesta.')]));
@@ -395,10 +399,13 @@ function renderRejected(p) {
     proposalText(p),
     el('div', { class: 'actions' },
       el('button', { type: 'button', class: 'btn', onclick: () => reconsider(p) }, 'Volver a considerar'),
+      whatsappButton(`Avisar a ${p.proposer_name}`,
+        `Hola ${p.proposer_name}, esta vez no puedo con «${p.title}» (${whenLong(p.date, p.slot)}). ¡Propón otro día! ${friendLink(state.settings.invite_code)}`),
       el('button', {
         type: 'button', class: 'btn text',
-        onclick: () => confirm(`¿Borrar la propuesta «${p.title}»? No se puede deshacer.`)
-          && act((tx) => tx.delete(['proposals', p.id]), 'Borrada.'),
+        onclick: async () => await ask({
+          title: '¿Borrar la propuesta?', text: `«${p.title}» desaparece del todo. No se puede deshacer.`, confirm: 'Borrar',
+        }) && act((tx) => tx.delete(['proposals', p.id]), 'Borrada.'),
       }, 'Borrar')));
 }
 
@@ -471,7 +478,9 @@ function renderReservations() {
         first.open ? 'Hacer privado' : 'Hacer abierto'),
       el('button', {
         type: 'button', class: 'btn text',
-        onclick: () => (items.length === 1 || confirm(`¿Quitar «${first.label}» de los ${items.length} espacios?`)) && removeReservations(items),
+        onclick: async () => (items.length === 1 || await ask({
+          title: `¿Quitar «${first.label}»?`, text: `Se quita de los ${items.length} espacios.`, confirm: 'Quitar todo',
+        })) && removeReservations(items),
       }, items.length === 1 ? 'Quitar' : 'Quitar todo'),
     );
   }));
@@ -485,7 +494,7 @@ function openSlot(date, slotId) {
   if (!$('sheet').open) $('sheet').showModal();
 }
 
-wireSheet();
+wireSheet(() => state.open);
 
 function renderSheet() {
   const { date, slotId } = state.open;
@@ -533,10 +542,19 @@ function renderHangout(h) {
         }, '×'))),
       el('li', { class: 'add' }, el('button', { type: 'button', onclick: () => addParticipant(h) }, 'Añadir persona'))),
     el('div', { class: 'actions' },
+      whatsappButton('Avisar por WhatsApp', confirmedText(h)),
+    ),
+    el('div', { class: 'actions' },
       el('button', { type: 'button', class: 'btn', onclick: () => setOpen('hangouts', [h], !h.open) }, h.open ? 'Hacer privado' : 'Hacer abierto'),
       el('button', { type: 'button', class: 'btn', onclick: () => openEdit('hangouts', h) }, 'Editar'),
       el('button', { type: 'button', class: 'btn text', onclick: () => removeHangout(h) }, 'Borrar plan')));
 }
+
+// What I send someone about a confirmed plan (WhatsApp lets me pick whom).
+const confirmedText = (h) => [
+  `¡Confirmado! «${h.title}», ${whenLong(h.date, h.slot)}${h.place ? ', en ' + h.place : ''}.`,
+  h.open ? `Los demás también lo ven y se pueden apuntar: ${friendLink(state.settings.invite_code)}` : `Lo ves en el calendario: ${friendLink(state.settings.invite_code)}`,
+].join(' ');
 
 const PRESETS = ['Gimnasio', 'Trabajo', 'Familia', 'Descanso'];
 
@@ -649,8 +667,8 @@ const reconsider = (p) => act((tx) => {
   tx.set(['receipts', p.id], receiptFor('pending', p));
 }, 'Devuelta a por confirmar.');
 
-function removeHangout(h) {
-  if (!confirm(`¿Borrar el plan «${h.title}»? Tus amigos dejan de verlo.`)) return;
+async function removeHangout(h) {
+  if (!await ask({ title: '¿Borrar el plan?', text: `«${h.title}» desaparece y tus amigos dejan de verlo.`, confirm: 'Borrar plan' })) return;
   act((tx) => {
     for (const person of peopleOf(h)) tx.delete(['hangouts', h.id, 'participants', person.key]);
     for (const device of joinedOf(h)) tx.delete(['hangouts', h.id, 'joined', device.uid]);
@@ -664,8 +682,10 @@ function removeHangout(h) {
 
 // Someone joining from here has no device behind them: they are counted, but
 // only the name says they are in.
-function addParticipant(h) {
-  const name = cleanName(prompt(`¿Quién más viene a «${h.title}»?`) || '');
+async function addParticipant(h) {
+  const name = cleanName(await ask({
+    title: `¿Quién más viene a «${h.title}»?`, confirm: 'Añadir', input: { label: 'Nombre', maxLength: LIMITS.name },
+  }));
   if (!name) return;
   if (peopleOf(h).some((person) => person.key === nameKey(name))) return toast(`${name} ya está apuntado.`);
   act((tx) => {
@@ -674,8 +694,8 @@ function addParticipant(h) {
   }, 'Añadido.');
 }
 
-function removeParticipant(h, person) {
-  if (!confirm(`¿Quitar a ${person.name} de «${h.title}»?`)) return;
+async function removeParticipant(h, person) {
+  if (!await ask({ title: `¿Quitar a ${person.name}?`, text: `Deja de estar en «${h.title}».`, confirm: 'Quitar' })) return;
   act((tx) => {
     tx.delete(['hangouts', h.id, 'participants', person.key]);
     for (const device of joinedOf(h).filter((j) => j.key === person.key)) tx.delete(['hangouts', h.id, 'joined', device.uid]);
@@ -745,10 +765,24 @@ $('edit-form').addEventListener('submit', (event) => {
 // ---- Invite link ----
 
 $('copy-link').addEventListener('click', () => copy($('link').textContent));
+
+// My WhatsApp number: friends' "Avisar a Jose" opens my chat directly.
+$('phone-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const typed = $('phone-form').elements.phone.value.trim();
+  const phone = cleanPhone(typed);
+  if (typed && !phone) return toast('Escribe el número con código de país, por ejemplo +591 70000000.');
+  act((tx) => tx.update(['settings', 'main'], { host_phone: phone }), phone ? 'Número guardado.' : 'Número quitado.');
+});
+
+// Back in view after a while: friends may have proposed or joined meanwhile.
+onReturn(() => { if (state.settings && !$('panel').hidden) refresh(); });
 $('share-link').addEventListener('click', () =>
   shareOnWhatsApp(`¡Voy a Cochabamba! Propón un plan o apúntate a uno aquí: ${$('link').textContent}`));
-$('rotate').addEventListener('click', () => {
-  if (!confirm('¿Cambiar el código? Todos los enlaces que ya mandaste dejan de funcionar.')) return;
+$('rotate').addEventListener('click', async () => {
+  if (!await ask({
+    title: '¿Cambiar el código?', text: 'Todos los enlaces que ya mandaste dejan de funcionar.', confirm: 'Cambiar código',
+  })) return;
   act((tx) => tx.update(['settings', 'main'], { invite_code: randomCode() }), 'Código cambiado. Manda el enlace nuevo.');
 });
 
@@ -757,10 +791,5 @@ $('rotate').addEventListener('click', () => {
 $('export').addEventListener('click', () => {
   if (!state.hangouts.length && !state.reservations.some((r) => r.kind === 'personal')) return toast('Todavía no hay planes ni reservas que descargar.');
   const ics = buildIcs({ hangouts: state.hangouts, reservations: state.reservations, participants: state.participants });
-  const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
-  const link = el('a', { href: url, download: 'cochabamba.ics' });
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  download(ics, 'cochabamba.ics', 'text/calendar;charset=utf-8');
 });

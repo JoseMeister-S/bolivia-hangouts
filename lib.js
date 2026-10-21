@@ -228,6 +228,40 @@ export function mapLinks({ lat, lng }, label = '') {
   };
 }
 
+// ---- Telling people ----
+
+// "viernes, 18 de diciembre, mañana (10:00 a 12:30)"
+export function whenLong(date, slot) {
+  const times = slotById[slot];
+  return `${formatDay(date)}, ${times.label.toLowerCase()} (${times.start} a ${times.end})`;
+}
+
+// A WhatsApp number as wa.me wants it: digits only, country code included.
+export function cleanPhone(value) {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 15 ? digits : '';
+}
+
+// A WhatsApp message to a number, or, without one, to whoever the sender picks.
+export const whatsappUrl = (text, phone = '') => `https://wa.me/${cleanPhone(phone)}?text=${encodeURIComponent(text)}`;
+
+// A date and slot time as calendars write local times: 20261218T100000.
+const localStamp = (date, time) => `${date.replaceAll('-', '')}T${time.replace(':', '')}00`;
+
+// "Add to Google Calendar" for one plan, in Bolivia time.
+export function googleCalendarUrl({ date, slot, title, place = '', details = '' }) {
+  const times = slotById[slot];
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: title,
+    dates: `${localStamp(date, times.start)}/${localStamp(date, times.end)}`,
+    ctz: 'America/La_Paz',
+  });
+  if (place) params.set('location', place);
+  if (details) params.set('details', details);
+  return `https://calendar.google.com/calendar/render?${params}`;
+}
+
 // ---- Proposals sent from this device ----
 
 // Friends cannot read proposals, and a confirmed plan stays private unless the
@@ -293,7 +327,7 @@ export function icsFold(line) {
 // ('personal') is exported, not travel or family blocks.
 // participants: hangout id -> [{ name }]
 export function buildIcs({ hangouts, reservations, participants, now = new Date() }) {
-  const local = (date, time) => `${date.replaceAll('-', '')}T${time.replace(':', '')}00`;
+  const local = localStamp;
   const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
   const event = ({ id, date, slot, summary, location, description, pin }) => {
     const times = slotById[slot];

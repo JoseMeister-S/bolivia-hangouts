@@ -73,6 +73,17 @@ service cloud.firestore {
       return getAfter(hangoutPath(id)).data.going == get(hangoutPath(id)).data.going + 1;
     }
 
+    // The same batch takes exactly one person off the hangout.
+    function goingDropped(id) {
+      return getAfter(hangoutPath(id)).data.going == get(hangoutPath(id)).data.going - 1;
+    }
+
+    // The new count and the `full` that follows from it (the host counts too).
+    function countFits(hangout, going) {
+      return request.resource.data.going == going
+        && request.resource.data.full == (hangout.capacity != null && going + 1 >= hangout.capacity);
+    }
+
     // Optional proposal fields: a limit, and a place (a web link and a pin).
     function validExtras(data) {
       return (!('capacity' in data) || data.capacity == null
@@ -150,12 +161,18 @@ service cloud.firestore {
       allow update: if isMember()
         && resource.data.open == true
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['going', 'full'])
-        && request.resource.data.going == resource.data.going + 1
+        && countFits(resource.data, resource.data.going + 1)
         && (resource.data.capacity == null || request.resource.data.going + 1 <= resource.data.capacity)
-        && request.resource.data.full == (resource.data.capacity != null
-             && request.resource.data.going + 1 >= resource.data.capacity)
         && !exists(joinedPath(id, request.auth.uid))
         && existsAfter(joinedPath(id, request.auth.uid));
+      // Leaving: one less, together with removing this device's joined
+      // document (and its participant).
+      allow update: if isMember()
+        && resource.data.open == true
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['going', 'full'])
+        && countFits(resource.data, resource.data.going - 1)
+        && exists(joinedPath(id, request.auth.uid))
+        && !existsAfter(joinedPath(id, request.auth.uid));
 
       match /participants/{pid} {
         // The document id is the lower-cased name, which makes names unique
@@ -170,6 +187,11 @@ service cloud.firestore {
           && pid == request.resource.data.name.lower()
           && getAfter(joinedPath(id, request.auth.uid)).data.key == pid
           && goingBumped(id);
+        // A friend takes back only their own name, as their device joined it.
+        allow delete: if isMember()
+          && get(joinedPath(id, request.auth.uid)).data.key == pid
+          && !existsAfter(joinedPath(id, request.auth.uid))
+          && goingDropped(id);
         allow read, write: if isAdmin();
       }
 
@@ -184,6 +206,10 @@ service cloud.firestore {
           && !exists(/databases/$(database)/documents/hangouts/$(id)/participants/$(request.resource.data.key))
           && existsAfter(/databases/$(database)/documents/hangouts/$(id)/participants/$(request.resource.data.key))
           && goingBumped(id);
+        allow delete: if isMember()
+          && uid == request.auth.uid
+          && !existsAfter(/databases/$(database)/documents/hangouts/$(id)/participants/$(resource.data.key))
+          && goingDropped(id);
         allow read, write: if isAdmin();
       }
     }
@@ -234,6 +260,10 @@ service cloud.firestore {
         && (!exists(/databases/$(database)/documents/blocked_slots/$(request.resource.data.date + '_' + request.resource.data.slot))
             || get(/databases/$(database)/documents/blocked_slots/$(request.resource.data.date + '_' + request.resource.data.slot)).data.kind == 'open')
         && counterBumpedFor(id);
+      // The device that sent a proposal may take it back while it waits.
+      allow delete: if isMember()
+        && resource.data.status == 'pending'
+        && resource.data.get('uid', null) == request.auth.uid;
       allow read, update, delete: if isAdmin();
     }
 
