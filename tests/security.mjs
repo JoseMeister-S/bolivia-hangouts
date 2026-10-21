@@ -325,6 +325,26 @@ if (EMULATOR) {
   await denied('the place of a plan you did not join', () => getDoc(doc(other.db, 'hangout_places', 'h1')));
   await allowed('the place of a plan you joined, even without a pin', () => getDoc(doc(good.db, 'hangout_places', 'h1')));
 
+  console.log('--- Leaving a plan');
+  // The page's leave: the name, this device's joined document and one less, in one batch.
+  const leave = (db, uid, hangoutId, key, { going, capacity = null, joined = true, drop = 1 } = {}) => {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'hangouts', hangoutId, 'participants', key));
+    if (joined) batch.delete(doc(db, 'hangouts', hangoutId, 'joined', uid));
+    if (drop) batch.update(doc(db, 'hangouts', hangoutId), { going: going - drop, full: capacity != null && going - drop + 1 >= capacity });
+    return batch.commit();
+  };
+  await denied('leave keeping the joined document', () => leave(other.db, other.uid, 'h3', 'gus', { going: 2, capacity: 3, joined: false }));
+  await denied('leave without lowering the count', () => leave(other.db, other.uid, 'h3', 'gus', { going: 2, capacity: 3, drop: 0 }));
+  await denied('leave counting two less', () => leave(other.db, other.uid, 'h3', 'gus', { going: 2, capacity: 3, drop: 2 }));
+  await denied('take someone else off the plan', () => leave(other.db, other.uid, 'h3', 'bea', { going: 2, capacity: 3 }));
+  await allowed('leave a full plan: the place is free again', () => leave(other.db, other.uid, 'h3', 'gus', { going: 2, capacity: 3 }));
+  const reopened = await allowed('the plan has room again for everyone', () => getDoc(doc(good.db, 'hangouts', 'h3')));
+  record(!!reopened && reopened.data().going === 1 && reopened.data().full === false, 'one going, not full');
+  await denied('leave twice', () => leave(other.db, other.uid, 'h3', 'gus', { going: 1, capacity: 3 }));
+  await denied('a friend Jose added (no device) cannot be taken off by others', () =>
+    leave(good.db, good.uid, 'h3', 'bea', { going: 1, capacity: 3, joined: false }));
+
   console.log('--- Proposals with a limit and a place');
   await denied('limit of 1', () => propose(good.db, { date: '2026-12-21', capacity: 1 }));
   await denied('limit of 51', () => propose(good.db, { date: '2026-12-21', capacity: 51 }));
@@ -336,6 +356,16 @@ if (EMULATOR) {
     date: '2026-12-21', capacity: 6, uid: good.uid, map_url: 'https://maps.app.goo.gl/x', lat: -17.39, lng: -66.16,
   }));
   await allowed('a proposal on a slot an open plan takes', () => propose(good.db, { date: '2026-12-20', slot: 'noche' }));
+
+  console.log('--- Withdrawing a proposal');
+  const waiting = await allowed('a proposal sent with its device', () => propose(good.db, { date: '2026-12-22', uid: good.uid }));
+  await denied('another device cannot withdraw it', () => deleteDoc(doc(other.db, 'proposals', waiting.id)));
+  await allowed('the device that sent it withdraws it', () => deleteDoc(doc(good.db, 'proposals', waiting.id)));
+  if (mine) await denied('a proposal sent without its device cannot be withdrawn', () => deleteDoc(doc(good.db, 'proposals', mine.id)));
+  await seed((db) => setDoc(doc(db, 'proposals', 'p-answered'), {
+    date: '2026-12-23', slot: 'tarde', title: 'Answered', place: '', proposer_name: 'Tester', note: '', status: 'rejected', uid: good.uid, created_at: Timestamp.now(),
+  }));
+  await denied('an answered proposal cannot be withdrawn', () => deleteDoc(doc(good.db, 'proposals', 'p-answered')));
   await denied('friend cannot remove a participant', () => deleteDoc(doc(good.db, 'hangouts', 'h1', 'participants', 'maría')));
   await denied('friend cannot edit an approved hangout', () => updateDoc(doc(good.db, 'hangouts', 'h1'), { title: 'hacked' }));
 

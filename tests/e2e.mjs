@@ -14,7 +14,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launch, PHONE, FRESH, checks } from './browser.mjs';
+import { launch, PHONE, FRESH, checks, shownText } from './browser.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const shots = process.env.SHOTS_DIR;
@@ -43,29 +43,57 @@ const { check, fail, finish } = checks();
 const errors = [];
 
 const browser = await launch();
-// page.answer(text) queues the reply to the next prompt(); confirm() is accepted.
 async function open(url, options = {}) {
   const context = await browser.newContext({ ...PHONE, acceptDownloads: true, reducedMotion: 'reduce', ...options });
   await context.clock.setFixedTime(TODAY);
   // Map tiles are not part of the test: answer them empty.
   await context.route('https://tile.openstreetmap.org/**', (route) => route.fulfill({ status: 204 }));
   const page = await context.newPage();
-  const answers = [];
-  page.answer = (text) => answers.push(text);
   page.on('pageerror', (e) => errors.push(`${url}: ${e.message}`));
-  page.on('dialog', (dialog) => dialog.accept(dialog.type() === 'prompt' ? answers.shift() ?? '' : undefined));
+  // The pages ask in their own dialogs; a browser pop-up is a bug.
+  page.on('dialog', (dialog) => { errors.push(`${url}: browser pop-up "${dialog.message()}"`); dialog.dismiss(); });
   await page.goto(base + url);
   return page;
 }
 const shot = (page, name, fullPage = false) => shots && page.screenshot({ path: path.join(shots, name + '.png'), fullPage });
 const cell = (page, date, index = 0) => page.locator(`#d-${date} .tt-cell`).nth(index);
-const cellText = async (page, date, index = 0) => (await cell(page, date, index).innerText()).replace(/\s+/g, ' ');
+const cellText = (page, date, index = 0) => shownText(cell(page, date, index));
 const cellHas = (page, date, index, className) =>
   cell(page, date, index).evaluate((node, name) => node.classList.contains(name), className);
 // Waits until a cell has (or, with not = true, lacks) a class: the page re-rendered after a write.
 const cellBecomes = (page, date, index, className, not = false) => page.waitForFunction(
   ([d, i, name, negate]) => document.querySelectorAll(`#d-${d} .tt-cell`)[i]?.classList.contains(name) !== negate,
   [date, index, className, not]);
+// Answers the page's own question (ask()): types into its field when given text, then confirms.
+async function answer(page, text) {
+  await page.waitForSelector('dialog.ask[open]');
+  if (text != null) await page.fill('dialog.ask input[name=answer]', text);
+  await page.click('dialog.ask button[value=yes]');
+  await page.waitForSelector('dialog.ask', { state: 'detached' });
+}
+// After sending, leaving or withdrawing, the sheet shows what happened: close it.
+const done = async (page) => { await page.click('.notice button:has-text("Listo")'); await page.waitForSelector('#sheet:not([open])', { state: 'attached' }); };
+// The page as if the friend switched to another app for a minute and came back.
+const comeBack = (page) => page.evaluate(() => {
+  const now = performance.now.bind(performance);
+  const hide = (hidden) => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  hide(true);
+  performance.now = () => now() + 60_000;
+  hide(false);
+});
+// axe-core, the usual accessibility checker, on what the page shows now.
+const AXE = fs.readFileSync(path.join(root, 'node_modules', 'axe-core', 'axe.min.js'), 'utf8');
+async function accessible(page, label) {
+  await page.addScriptTag({ content: AXE });
+  const { violations } = await page.evaluate(() => window.axe.run(document, {
+    runOnly: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'],
+  }));
+  const found = violations.map((v) => `${v.id} x${v.nodes.length} [${v.nodes.slice(0, 3).map((n) => n.target.join(' ')).join(' ; ')}]`);
+  check(found.length === 0, `accessible: ${label}` + (found.length ? ' -- ' + found.join(' | ') : ''));
+}
 const reloaded = async (page, selector = FRESH) => { await page.reload(); await page.waitForSelector(selector, { state: 'attached' }); };
 // Everything a friend's page holds, visible or not, and what it saved for the next visit.
 const pageText = (page) => page.evaluate(() => document.body.textContent);
@@ -137,9 +165,25 @@ try {
   await caro.fill('.propose input[name=title]', 'Salteñas y café');
   await caro.fill('.propose input[name=place]', 'Zona norte');
   await caro.click('.propose button[type=submit]');
+  await caro.waitForSelector('.notice');
+  const nudge = await caro.locator('.notice').getByRole('link', { name: 'Avisar a Jose por WhatsApp' }).getAttribute('href');
+  check(nudge.startsWith('https://wa.me/?text=') && decodeURIComponent(nudge).includes('«Salteñas y café», viernes'),
+    'after proposing, a ready WhatsApp message to Jose');
+  await done(caro);
   await caro.waitForSelector('.tt-cell.is-wait');
   check(await caro.locator('.tt-cell.is-plan').count() === 0, 'proposal is pending, not shown as a plan');
   check((await caro.innerText('#toast')).startsWith('¡Enviado!'), 'confirmation message shown');
+  check((await caro.innerText('#mine-list')).includes('Salteñas y café') && (await caro.innerText('#mine-list')).includes('Por confirmar'),
+    '"Tus planes" lists the proposal');
+  await accessible(caro, "friends' page, light");
+  // Large text (as with the phone's text size at 200%): each day becomes a list.
+  await caro.addStyleTag({ content: 'html { font-size: 200% }' });
+  const row = await caro.locator('#d-2026-12-18 .tt-cell').first().boundingBox();
+  check(await caro.locator('#d-2026-12-18 .tt-when').first().isVisible() && row.width > 300,
+    'with large text the timetable becomes a list, one full line per slot');
+  await accessible(caro, "friends' page with large text");
+  await caro.reload();
+  await caro.waitForSelector(FRESH);
 
   const luis = await open(friendUrl, { colorScheme: 'dark' });
   await luis.waitForSelector(FRESH);
@@ -154,7 +198,7 @@ try {
 
   await reloaded(luis);
   const luisCell = cell(luis, '2026-12-18');
-  check((await luisCell.innerText()) === 'Ocupado', 'another friend sees only "Ocupado" in that slot');
+  check((await shownText(luisCell)) === 'Ocupado', 'another friend sees only "Ocupado" in that slot');
   const luisText = await pageText(luis);
   check(!luisText.includes('Salteñas') && !luisText.includes('Caro'), 'the page of another friend holds neither the plan nor the name');
   await luisCell.click();
@@ -256,6 +300,7 @@ try {
   await caro.fill('.propose input[name=title]', 'Fútbol');
   await caro.fill('.propose textarea[name=note]', 'Nota secreta para Jose');
   await caro.click('.propose button[type=submit]');
+  await done(caro);
   await cellBecomes(caro, D, 2, 'is-wait');
 
   await reloaded(admin, '#pending .entry');
@@ -297,14 +342,19 @@ try {
   check((await cellText(luis, D, 2)) === 'Ocupado', 'made private again: other friends see "Ocupado"');
 
   // ---- Participants, then removing the plan
-  admin.answer('Ana');
   await inSheet(admin, 'Añadir persona').click();
+  await answer(admin, 'Ana');
   await admin.waitForSelector('#sheet-body .chips li:has-text("Ana")');
   check(true, 'the host adds a participant');
   await admin.locator('#sheet-body').getByRole('button', { name: 'Quitar a Ana' }).click();
+  await answer(admin);
   await admin.waitForFunction(() => !document.querySelector('#sheet-body .chips').textContent.includes('Ana'));
   check(true, 'the host removes a participant');
+  const tell = await admin.locator('#sheet-body').getByRole('link', { name: 'Avisar por WhatsApp' }).getAttribute('href');
+  check(decodeURIComponent(tell).includes('¡Confirmado! «Fútbol y asado»'), 'the host can tell people about a plan on WhatsApp');
+  await accessible(admin, 'admin sheet with a plan');
   await inSheet(admin, 'Borrar plan').click();
+  await answer(admin);
   await cellBecomes(admin, D, 2, 'is-free');
   await admin.click('#sheet-close');
   await reloaded(caro);
@@ -317,6 +367,7 @@ try {
   await luis.waitForSelector('#sheet[open] .propose');
   await luis.fill('.propose input[name=title]', 'Cine');
   await luis.click('.propose button[type=submit]');
+  await done(luis);
   await cellBecomes(luis, T, 3, 'is-wait');
   await reloaded(admin, '#pending .entry');
   await admin.locator('#pending .entry', { hasText: 'Cine' }).getByRole('button', { name: 'Rechazar' }).click();
@@ -329,7 +380,10 @@ try {
   check(await cellHas(luis, T, 3, 'is-wait'), 'the proposer sees a reconsidered proposal as pending');
   await admin.locator('#pending .entry', { hasText: 'Cine' }).getByRole('button', { name: 'Rechazar' }).click();
   await admin.waitForFunction(() => document.getElementById('rejected-count').textContent === '1');
+  check(decodeURIComponent(await admin.locator('#rejected').getByRole('link', { name: 'Avisar a Luis' }).getAttribute('href'))
+    .includes('esta vez no puedo con «Cine»'), 'the host can tell the proposer about a rejection');
   await admin.locator('#rejected').getByRole('button', { name: 'Borrar' }).click();
+  await answer(admin);
   await admin.waitForFunction(() => document.getElementById('rejected-count').textContent === '0');
   check(true, 'a rejected proposal can be deleted');
   await reloaded(luis);
@@ -347,8 +401,9 @@ try {
   check(await admin.locator('#pending .entry').count() === 0 && await cellHas(caro, T, 2, 'is-free'), 'the honeypot sends nothing');
 
   // ---- Changing the name to one already taken in a plan
-  caro.answer('Luis');
   await caro.getByRole('button', { name: 'Cambiar nombre' }).click();
+  await accessible(caro, 'the name question');
+  await answer(caro, 'Luis');
   await caro.waitForFunction(() => document.getElementById('hello').textContent.includes('Luis'));
   await caro.getByRole('button', { name: '28 dic al 2 ene' }).click();
   await cell(caro, '2026-12-30', 3).click();
@@ -365,6 +420,7 @@ try {
   await admin.click('#sheet-close');
   check(await cellHas(admin, '2026-12-24', 2, 'is-free'), 'one reserved slot is removed from the sheet');
   await admin.locator('#reservations li', { hasText: 'Gimnasio' }).getByRole('button', { name: 'Quitar todo' }).click();
+  await answer(admin);
   await admin.waitForFunction(() => !document.querySelector('#tt .tt-cell.is-own'));
   await reloaded(caro);
   check(await cellHas(caro, '2026-12-15', 0, 'is-free') && await cellHas(caro, '2026-12-24', 2, 'is-free'),
@@ -372,8 +428,8 @@ try {
 
   // ---- A plan with a limit and a place: inviting while it has room, "Ocupado" once full
   const G = '2026-12-23'; // a Wednesday; the gym mornings are gone by now
-  caro.answer('Caro');
   await caro.getByRole('button', { name: 'Cambiar nombre' }).click();
+  await answer(caro, 'Caro');
   await caro.waitForFunction(() => document.getElementById('hello').textContent.includes('Caro'));
   await caro.getByRole('button', { name: '21 al 27 dic' }).click();
   await cell(caro, G, 3).click();
@@ -383,8 +439,12 @@ try {
   await caro.fill('.propose input[name=map_url]',
     'https://www.google.com/maps/place/Ludoteca/@-17.38,-66.15,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d-17.3934!4d-66.1571');
   await caro.waitForFunction(() => document.querySelector('.propose .place-picker .hint').textContent.startsWith('Pin puesto'));
+  // The pin is drawn once the map has loaded, a moment after the link is read.
+  await caro.waitForSelector('.propose .leaflet-marker-icon');
   check(await caro.locator('.propose .leaflet-marker-icon').count() === 1, 'a pasted Google Maps link drops the pin on the map');
+  await accessible(caro, 'the proposal form with a map');
   await caro.click('.propose button[type=submit]');
+  await done(caro);
   await cellBecomes(caro, G, 3, 'is-wait');
 
   await reloaded(admin, '#pending .entry');
@@ -411,6 +471,7 @@ try {
   check(google.includes('query=-17.3934%2C-66.1571') && apple.startsWith('https://maps.apple.com/?ll=-17.3934%2C-66.1571'),
     'once in, the friend sees the map and can open it in Google Maps or Apple Maps');
   await shot(luis, 'friend-place');
+  await accessible(luis, 'a joined plan with its map, dark');
   await luis.click('#sheet-close');
   check((await cellText(luis, G, 3)).startsWith('Juegos de mesa') && !(await cellHas(luis, G, 3, 'is-joinable')),
     'the joiner still sees the full plan');
@@ -460,6 +521,67 @@ try {
   check(places.some((d) => d.fields.map_url?.stringValue === 'https://maps.app.goo.gl/AbCd123' && 'doubleValue' in (d.fields.lat || {})),
     'the plan keeps the short link and the tapped pin');
 
+  // ---- Jose's number, leaving a plan, a page that refreshes itself, focus
+  await reloaded(admin, '#panel:not([hidden])');
+  await accessible(admin, 'admin panel');
+  await admin.fill('#phone-form input[name=phone]', '+591 7000 0000');
+  await admin.click('#phone-form button[type=submit]');
+  await toastIs(admin, 'Número guardado.');
+
+  await ana.click('#sheet-close');
+  await ana.waitForFunction((d) => document.activeElement?.dataset?.date === d, G);
+  check(true, 'closing the sheet puts the focus back on its slot');
+  await reloaded(luis);
+  await luis.getByRole('button', { name: '21 al 27 dic' }).click();
+  await cell(luis, G, 3).click();
+  await luis.locator('#sheet-body').getByRole('button', { name: 'Ya no puedo ir' }).click();
+  await answer(luis);
+  await luis.waitForSelector('.notice');
+  check((await luis.locator('.notice').getByRole('link', { name: 'Avisar a Jose por WhatsApp' }).getAttribute('href'))
+    .startsWith('https://wa.me/59170000000?text='), "leaving offers a message straight to Jose's number");
+  await done(luis);
+  check(await cellHas(luis, G, 3, 'is-joinable'), 'after leaving, the plan is open to join again');
+
+  check((await cellText(ana, G, 3)) === 'Ocupado', 'a page left open still shows the old state');
+  await comeBack(ana);
+  await cellBecomes(ana, G, 3, 'is-joinable');
+  check((await cellText(ana, G, 3)).includes('Queda 1'), 'coming back to the page refreshes it: the place is free again');
+
+  // ---- "Tus planes" and adding a plan to one's own calendar
+  const mineList = await luis.innerText('#mine-list');
+  check(mineList.includes('Fiesta de fin de año') && mineList.includes('Te apuntaste') && !mineList.includes('Juegos de mesa'),
+    '"Tus planes" lists the plans the friend is in');
+  await luis.locator('#mine-list').getByRole('button', { name: /Fiesta de fin de año/ }).click();
+  await luis.waitForSelector('#sheet[open] .entry.is-plan');
+  check((await luis.innerText('#sheet-title')).includes('30 de diciembre'), 'a plan in the list opens its slot');
+  const gcal = new URL(await luis.locator('#sheet-body').getByRole('link', { name: 'Añadir a Google Calendar' }).getAttribute('href'));
+  check(gcal.searchParams.get('dates') === '20261230T200000/20261230T233000' && gcal.searchParams.get('text') === 'Fiesta de fin de año',
+    'Google Calendar gets the plan with its times');
+  const [planFile] = await Promise.all([luis.waitForEvent('download'), luis.locator('#sheet-body').getByRole('button', { name: 'Descargar para otro calendario' }).click()]);
+  const planIcs = fs.readFileSync(await planFile.path(), 'utf8');
+  check(planIcs.includes('SUMMARY:Fiesta de fin de año') && (planIcs.match(/BEGIN:VEVENT/g) || []).length === 1,
+    'the .ics for other calendars holds that one plan');
+  await luis.click('#sheet-close');
+
+  // ---- Withdrawing a proposal
+  const W = '2026-12-26';
+  await reloaded(ana);
+  await ana.getByRole('button', { name: '21 al 27 dic' }).click();
+  await cell(ana, W, 2).click();
+  await ana.fill('.propose input[name=name]', 'Ana');
+  await ana.fill('.propose input[name=title]', 'Cena');
+  await ana.click('.propose button[type=submit]');
+  await done(ana);
+  await cellBecomes(ana, W, 2, 'is-wait');
+  await cell(ana, W, 2).click();
+  await ana.locator('#sheet-body').getByRole('button', { name: 'Retirar propuesta' }).click();
+  await answer(ana);
+  await ana.waitForSelector('.notice:has-text("Propuesta retirada")');
+  await done(ana);
+  check(await cellHas(ana, W, 2, 'is-free'), 'a withdrawn proposal leaves the slot free');
+  await reloaded(admin, '#panel:not([hidden])');
+  check(!(await admin.innerText('#pending')).includes('Cena'), 'and Jose no longer has it to confirm');
+
   // ---- Data from the previous version is upgraded when the admin page opens
   // (written with the emulator's owner access, as the live data looks today).
   await rest('settings/main?updateMask.fieldPaths=schema', 'PATCH', { schema: { integerValue: '2' } });
@@ -489,6 +611,7 @@ try {
 
   // ---- Rotating the code locks friends out
   await admin.click('#rotate');
+  await answer(admin);
   await admin.waitForFunction((old) => document.getElementById('link').textContent !== old, link);
   await caro.reload();
   await caro.waitForSelector('#gate:not([hidden])');
@@ -508,6 +631,7 @@ try {
   await lost.clock.runFor(10_000);
   await lost.waitForURL(`${base}/?emulator&c=${code}`, { waitUntil: 'commit' });
   check(true, 'after 10 seconds the 404 page goes to the calendar');
+  await accessible(lost, 'the 404 page');
   await lost.goto(`${base}/admin`);
   check(await lost.getAttribute('#go', 'href') === `${base}/admin.html` && (await lost.innerText('#go')) === 'Ir al panel',
     'an address that mentions admin leads to the panel');

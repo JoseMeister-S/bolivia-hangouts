@@ -103,6 +103,13 @@
           <button type="button" class="btn" id="share-link">Mandar por WhatsApp</button>
           <button type="button" class="btn text" id="rotate">Cambiar código</button>
         </div>
+        <form class="phone" id="phone-form">
+          <label>Tu WhatsApp, con código de país
+            <input name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="Ej. +591 70000000">
+            <span class="hint">Cuando un amigo toca «Avisar a Jose», el mensaje te llega directo. Tus amigos pueden ver este número.</span>
+          </label>
+          <button type="submit" class="btn">Guardar número</button>
+        </form>
       </section>
 
       <section>
@@ -130,9 +137,9 @@
     <div id="sheet-body"></div>
   </dialog>
 
-  <dialog id="edit-dialog" class="sheet">
+  <dialog id="edit-dialog" class="sheet" aria-labelledby="edit-title">
     <form method="dialog" id="edit-form">
-      <h2>Editar</h2>
+      <h2 id="edit-title">Editar</h2>
       <label>Día <select name="date" required></select></label>
       <label>Momento <select name="slot" required></select></label>
       <label>Plan <input name="title" required></label>

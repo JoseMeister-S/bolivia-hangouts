@@ -2,19 +2,20 @@
 // hangout, tap a confirmed one to join it.
 import { signInAnonymously } from 'firebase/auth';
 import {
-  doc, collection, collectionGroup, getDoc, getDocs, setDoc, writeBatch, query, where, serverTimestamp, increment,
+  doc, collection, collectionGroup, getDoc, getDocs, setDoc, deleteDoc, writeBatch, query, where, serverTimestamp,
+  increment,
 } from 'firebase/firestore/lite';
 import {
-  auth, db, $, el, store, toast, friendLink, shareOnWhatsApp, wireSheet, renderTimetable, legend, participantDoc,
-  placePicker, placeView, capacityInput, CAPACITY_ERROR, SLOTS, slotById, slotKey, LIMITS, tripDays, formatDay,
-  todayInBolivia, clean, cleanName, nameKey, countdownText, plural, freeText, reservationStatus, sentStatus,
-  cleanCapacity, isFull, spotsLeft,
+  auth, db, $, el, store, toast, friendLink, shareOnWhatsApp, whatsappButton, calendarButtons, ask, onReturn,
+  wireSheet, renderTimetable, legend, participantDoc, placePicker, placeView, capacityInput, CAPACITY_ERROR, SLOTS,
+  slotById, slotKey, slotIndex, LIMITS, tripDays, formatDay, todayInBolivia, clean, cleanName, nameKey,
+  countdownText, plural, freeText, reservationStatus, sentStatus, cleanCapacity, isFull, spotsLeft, whenLong,
 } from './common.js';
 
 // Everything this page keeps in the browser.
 const KEYS = { name: 'bh_name', code: 'bh_code', registered: 'bh_reg', sent: 'bh_sent', cache: 'bh_cache' };
 // Bump when the shape of the saved copy changes; an older copy is ignored.
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 const state = {
   code: null,
@@ -23,13 +24,16 @@ const state = {
   blocked: new Map(),      // 'date_slot' -> { label, kind }: taken slots; label is '' unless Jose opened it
   hangouts: new Map(),     // 'date_slot' -> [hangout]: open plans with room, and the full ones this device is in
   hangoutIds: new Set(),
-  joinedIds: new Set(),    // hangouts this device joined (or proposed and got approved)
+  joined: new Map(),       // hangout id -> this device's participant key, for the plans it is in
   places: new Map(),       // hangout id -> { map_url, lat, lng }, only for those
   participants: new Map(), // hangout id -> [{ name }]
   receipts: new Map(),     // proposal id -> receipt, for proposals sent from this device
   sent: [],                // what to draw of those proposals (sentStatus), set by render()
   open: null,              // { date, slotId, proposing } of the slot shown in the sheet
 };
+
+// Jose's WhatsApp number, when he set one: messages to him open his chat.
+const hostPhone = () => state.settings?.host_phone || '';
 
 // The invite code arrives as ?c=CODE and is remembered on this device.
 const urlCode = new URLSearchParams(location.search).get('c');
@@ -59,10 +63,10 @@ function saveCache() {
   store.set(KEYS.cache, JSON.stringify({
     version: CACHE_VERSION,
     code: state.code,
-    settings: { trip_start: state.settings.trip_start, trip_end: state.settings.trip_end },
+    settings: { trip_start: state.settings.trip_start, trip_end: state.settings.trip_end, host_phone: hostPhone() },
     blocked: [...state.blocked],
     hangouts: [...state.hangouts],
-    joinedIds: [...state.joinedIds],
+    joined: [...state.joined],
     places: [...state.places],
     participants: [...state.participants],
     receipts: [...state.receipts],
@@ -77,7 +81,7 @@ function readCache() {
     state.blocked = new Map(cache.blocked);
     state.hangouts = new Map(cache.hangouts);
     state.hangoutIds = new Set([...state.hangouts.values()].flat().map((h) => h.id));
-    state.joinedIds = new Set(cache.joinedIds);
+    state.joined = new Map(cache.joined);
     state.places = new Map(cache.places);
     state.participants = new Map(cache.participants);
     state.receipts = new Map(cache.receipts);
@@ -158,7 +162,8 @@ async function load() {
     Promise.all(readSent().map((p) => getDoc(doc(db, 'receipts', p.id))
       .then((receipt) => (receipt.exists() ? [p.id, receipt.data()] : null), () => null))),
   ]);
-  const joinedIds = joined.docs.map((d) => d.ref.parent.parent.id);
+  const joinedKeys = joined.docs.map((d) => [d.ref.parent.parent.id, d.data().key]);
+  const joinedIds = joinedKeys.map(([id]) => id);
   const open = hangouts.docs.map((d) => ({ id: d.id, ...d.data() }));
   // A full plan this device is in does not come with the query: fetch it by
   // id. A private one (its proposer's) cannot be read: its receipt tells.
@@ -173,7 +178,7 @@ async function load() {
   ]);
 
   state.settings = settings.data();
-  state.joinedIds = new Set(joinedIds);
+  state.joined = new Map(joinedKeys);
   state.places = new Map(places.filter(Boolean));
   state.blocked = new Map(blocked.docs.map((d) => [d.id, d.data()]));
   state.hangouts = new Map();
@@ -194,7 +199,7 @@ function readSent() {
 
 const people = (hangout) => state.participants.get(hangout.id) || [];
 // In the plan: this device joined it, or (someone Jose added) the name matches.
-const isMine = (hangout) => state.joinedIds.has(hangout.id)
+const isMine = (hangout) => state.joined.has(hangout.id)
   || (!!state.name && people(hangout).some((p) => nameKey(p.name) === nameKey(state.name)));
 const canJoin = (hangout) => !hangout.full && !isMine(hangout);
 
@@ -270,6 +275,7 @@ function render() {
     freeText(free),
     mineCount ? `Tienes ${plural(mineCount, 'plan', 'planes')} con Jose.` : '',
   ].join(' ');
+  renderMine(today);
 
   $('legend').replaceChildren(legend([
     ['free', 'Libre'], ['plan is-joinable', 'Plan abierto: te puedes apuntar'], ['plan', 'Tu plan'],
@@ -283,6 +289,23 @@ function render() {
   if ($('sheet').open && state.open) renderSheet();
 }
 
+// The friend's own plans and proposals still ahead, soonest first: one tap
+// opens each one, without hunting through the timetable.
+function renderMine(today) {
+  const plans = [
+    ...[...state.hangouts.values()].flat().filter(isMine)
+      .map((h) => ({ date: h.date, slot: h.slot, title: h.title, status: h.full ? 'Te apuntaste (completo)' : 'Te apuntaste' })),
+    ...state.sent.map((p) => ({ date: p.date, slot: p.slot, title: p.title, status: p.status === 'confirmed' ? 'Confirmado' : 'Por confirmar' })),
+  ].filter((p) => p.date >= today)
+    .sort((a, b) => a.date.localeCompare(b.date) || slotIndex(a.slot) - slotIndex(b.slot));
+  $('mine').hidden = !plans.length;
+  $('mine-list').replaceChildren(...plans.map((p) => el('li', {},
+    el('button', { type: 'button', class: 'mine-item', onclick: () => openSlot(p.date, p.slot) },
+      el('span', { class: 'mine-when' }, `${formatDay(p.date)}, ${slotById[p.slot].label.toLowerCase()}`),
+      el('strong', { class: 'mine-title' }, p.title),
+      el('span', { class: 'mine-status' }, p.status)))));
+}
+
 // ---- Slot sheet ----
 
 function openSlot(date, slotId) {
@@ -291,7 +314,7 @@ function openSlot(date, slotId) {
   if (!$('sheet').open) $('sheet').showModal();
 }
 
-wireSheet();
+wireSheet(() => state.open);
 
 // The name is asked for once, inside the first form that needs it.
 function nameField() {
@@ -315,12 +338,29 @@ function takeName(form) {
   return !!state.name;
 }
 
-function changeName() {
-  const name = cleanName(prompt('¿Cómo te llamas?', state.name) || '');
+async function changeName() {
+  const answer = await ask({
+    title: '¿Cómo te llamas?', confirm: 'Guardar',
+    input: { label: 'Tu nombre', value: state.name, maxLength: LIMITS.name },
+  });
+  const name = cleanName(answer);
   if (!name) return;
   setName(name);
   render();
 }
+
+// After an action, the sheet says what happened and offers to tell Jose.
+function notice(title, text, message) {
+  $('sheet-body').replaceChildren(el('div', { class: 'notice', role: 'status' },
+    el('h3', {}, title),
+    el('p', {}, text),
+    el('div', { class: 'actions' },
+      whatsappButton('Avisar a Jose por WhatsApp', message, hostPhone(), ' primary'),
+      el('button', { type: 'button', class: 'btn text', onclick: () => $('sheet').close() }, 'Listo'))));
+}
+
+// A plan as the calendar buttons want it.
+const asPlan = (hangout) => ({ ...hangout, location: state.places.get(hangout.id) ?? null });
 
 function renderSheet() {
   const { date, slotId } = state.open;
@@ -343,7 +383,10 @@ function renderSheet() {
     body.push(el('div', { class: 'entry is-plan' },
       el('h3', {}, p.title),
       el('p', {}, 'Jose confirmó tu plan. Solo tú y Jose lo ven.'),
-      placeView(state.places.get(p.hangout), p.title)));
+      placeView(state.places.get(p.hangout), p.title),
+      calendarButtons(asPlan({ id: p.hangout, date: p.date, slot: p.slot, title: p.title, place: '', proposer_name: state.name })),
+      // A private plan is Jose's to change: tell him.
+      el('div', { class: 'actions' }, whatsappButton('Ya no puedo ir: avisar a Jose', cantComeText(p), hostPhone(), ' text'))));
   }
   if (block && !confirmed.length) {
     body.push(el('div', { class: 'entry is-' + (block.label ? reservationStatus(block.kind) : 'off') },
@@ -354,7 +397,9 @@ function renderSheet() {
   for (const p of waiting) {
     body.push(el('div', { class: 'entry is-wait' },
       el('h3', {}, p.title),
-      el('p', {}, 'Tu propuesta espera la confirmación de Jose.')));
+      el('p', {}, 'Tu propuesta espera la confirmación de Jose.'),
+      el('div', { class: 'actions' },
+        el('button', { type: 'button', class: 'btn text', onclick: () => withdraw(p) }, 'Retirar propuesta'))));
   }
   if (past && !block && !hangouts.length) body.push(el('p', {}, 'Este día ya pasó.'));
   if (!block && !past) {
@@ -381,7 +426,63 @@ function renderHangout(hangout, past) {
     // The pin is only for those going.
     mine ? placeView(state.places.get(hangout.id), hangout.title) : null,
     past ? null : mine ? el('p', { class: 'done' }, 'Ya estás apuntado.') : hangout.full ? null : joinForm,
+    mine && !past ? calendarButtons(asPlan(hangout), state.participants) : null,
+    // Only the device that joined can take the name back; someone Jose added asks him.
+    state.joined.has(hangout.id) && !past
+      ? el('div', { class: 'actions' }, el('button', { type: 'button', class: 'btn text', onclick: () => leave(hangout) }, 'Ya no puedo ir'))
+      : null,
   );
+}
+
+const cantComeText = (plan) =>
+  `Hola Jose, al final no puedo ir a «${plan.title}» (${whenLong(plan.date, plan.slot)}).`;
+
+// Leaving is the join in reverse, in one batch: the name, this device's
+// joined document, and one less in the count.
+async function leave(hangout) {
+  const yes = await ask({
+    title: '¿Ya no puedes ir?',
+    text: `Te quitamos de «${hangout.title}» y tu plaza queda libre para otra persona.`,
+    confirm: 'Sí, quitarme', cancel: 'No, sigo yendo',
+  });
+  if (!yes) return;
+  try {
+    await ready.catch(() => {});
+    const going = (hangout.going ?? 1) - 1;
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'hangouts', hangout.id, 'participants', state.joined.get(hangout.id)));
+    batch.delete(doc(db, 'hangouts', hangout.id, 'joined', auth.currentUser.uid));
+    batch.update(doc(db, 'hangouts', hangout.id), { going, full: isFull(hangout.capacity ?? null, going) });
+    await batch.commit();
+  } catch (error) {
+    console.error(error);
+    return toast('No se pudo. Revisa tu conexión y prueba otra vez.');
+  }
+  await load().then(saveCache, console.error);
+  render();
+  notice('Ya no estás apuntado', `Dejaste «${hangout.title}». Si quieres, cuéntale a Jose.`,
+    `${cantComeText(hangout)} Ya me quité del calendario.`);
+}
+
+// A proposal that still waits can be taken back from the device that sent it.
+async function withdraw(p) {
+  const yes = await ask({
+    title: '¿Retirar tu propuesta?', text: `Jose ya no verá «${p.title}».`, confirm: 'Retirar', cancel: 'Dejarla',
+  });
+  if (!yes) return;
+  try {
+    await ready.catch(() => {});
+    await deleteDoc(doc(db, 'proposals', p.id));
+  } catch (error) {
+    console.error(error);
+    return toast(error.code === 'permission-denied'
+      ? 'No se pudo retirar: puede que Jose ya la haya respondido. Escríbele.'
+      : 'No se pudo. Revisa tu conexión y prueba otra vez.');
+  }
+  store.set(KEYS.sent, JSON.stringify(readSent().filter((sent) => sent.id !== p.id)));
+  render();
+  notice('Propuesta retirada', `«${p.title}» ya no está en el calendario.`,
+    `Hola Jose, retiré mi propuesta «${p.title}» (${whenLong(p.date, p.slot)}).`);
 }
 
 // Joining is one batch: the name, this device's joined document, and one more
@@ -477,9 +578,10 @@ function proposeForm(date, slotId, another) {
       if (auth.currentUser) data.uid = auth.currentUser.uid;
       const id = await sendProposal(data);
       store.set(KEYS.sent, JSON.stringify([...readSent(), { id, date, slot: slotId, title }]));
-      $('sheet').close();
       toast('¡Enviado! Jose lo confirma pronto.');
       render();
+      notice('¡Enviado!', 'Jose lo confirma pronto. Si quieres, avísale por WhatsApp para que lo vea antes.',
+        `Hola Jose, te propuse un plan en el calendario: «${title}», ${whenLong(date, slotId)}.`);
     } catch (err) {
       console.error(err);
       error.textContent = err.code === 'permission-denied'
@@ -519,5 +621,8 @@ async function sendProposal(data) {
 
 $('share').addEventListener('click', () =>
   shareOnWhatsApp(`Jose va a estar en Cochabamba. Propón un plan o apúntate a uno aquí: ${friendLink(state.code)}`));
+
+// Back in view after a while: fresh data (places fill up, plans open).
+onReturn(() => load().then(() => { saveCache(); render(); }, console.error));
 
 start();

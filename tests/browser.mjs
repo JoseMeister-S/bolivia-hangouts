@@ -27,3 +27,9 @@ export function checks() {
     },
   };
 }
+
+// What a timetable cell shows on screen: its text without the part only
+// screen readers get (the day and slot) or that the layout hides.
+export const shownText = (locator) => locator.evaluate((node) => [...node.children]
+  .filter((child) => !child.classList.contains('sr-only') && child.checkVisibility())
+  .map((child) => child.innerText).join(' ').replace(/\s+/g, ' ').trim());

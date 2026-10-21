@@ -5,7 +5,7 @@
 //   INVITE_CODE=xxx node tests/smoke.mjs <url>             -> also send one proposal
 //
 // Without READ_ONLY it sends one proposal titled "[TEST] smoke". Reject it in admin.html.
-import { launch, PHONE, FRESH, checks } from './browser.mjs';
+import { launch, PHONE, FRESH, checks, shownText } from './browser.mjs';
 
 const base = (process.argv[2] || 'http://localhost:5500').replace(/\/$/, '');
 const code = process.env.INVITE_CODE;
@@ -47,7 +47,7 @@ if (code) {
     const { page, errors } = await open('/?c=' + encodeURIComponent(code), { colorScheme });
     await page.waitForSelector(FRESH, { timeout: 20000 });
     check(await page.locator('.tt-row[id^="d-"]').count() === 20, `${colorScheme}: timetable has 20 days`);
-    check((await page.locator('#d-2026-12-14 .tt-cell').first().innerText()) === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
+    check((await shownText(page.locator('#d-2026-12-14 .tt-cell').first())) === 'Llegando a Cochabamba (21:55)', `${colorScheme}: 14 Dec is blocked with its label`);
     check(await page.evaluate(() => document.fonts.check('16px "Bricolage Grotesque"')), `${colorScheme}: the typeface loaded`);
     if (shots) await page.screenshot({ path: `${shots}/live-${colorScheme}.png` });
 

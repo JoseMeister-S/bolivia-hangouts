@@ -253,3 +253,19 @@ test('.ics: events, escaping, time zone; only own time from reservations', () =>
   assert.ok(!text.includes('Navidad'), 'family blocks are not exported');
   assert.equal(text.match(/BEGIN:VEVENT/g).length, 2);
 });
+
+test('telling people: when, WhatsApp links and Google Calendar', async () => {
+  const { whenLong, cleanPhone, whatsappUrl, googleCalendarUrl } = await import('../lib.js');
+  assert.match(whenLong('2026-12-18', 'manana'), /^viernes,? 18 de diciembre, mañana \(10:00 a 12:30\)$/);
+  assert.equal(cleanPhone('+591 700-00000'), '59170000000');
+  assert.equal(cleanPhone('123'), '', 'too short to be a number');
+  assert.equal(whatsappUrl('Hola & chau', '+591 70000000'), 'https://wa.me/59170000000?text=Hola%20%26%20chau');
+  assert.equal(whatsappUrl('Hola'), 'https://wa.me/?text=Hola', 'no number: WhatsApp asks whom to send it to');
+  const url = new URL(googleCalendarUrl({ date: '2026-12-18', slot: 'noche', title: 'Juegos de mesa', place: '-17.39,-66.16' }));
+  assert.equal(url.origin + url.pathname, 'https://calendar.google.com/calendar/render');
+  assert.equal(url.searchParams.get('action'), 'TEMPLATE');
+  assert.equal(url.searchParams.get('text'), 'Juegos de mesa');
+  assert.equal(url.searchParams.get('dates'), '20261218T200000/20261218T233000');
+  assert.equal(url.searchParams.get('ctz'), 'America/La_Paz');
+  assert.equal(url.searchParams.get('location'), '-17.39,-66.16');
+});
